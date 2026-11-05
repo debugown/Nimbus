@@ -1859,3 +1859,33 @@ msgstr "O Nimbus foi atualizado"
 
 msgid "Что нового"
 msgstr "Novidades"
+
+msgid "Подключение"
+msgstr "Conexão"
+
+msgid "Конфиденциальность"
+msgstr "Privacidade"
+
+msgid "Средняя задержка"
+msgstr "Latência média"
+
+msgid "Последняя задержка"
+msgstr "Última latência"
+
+msgid "Потеря исходящих пакетов"
+msgstr "Perda de pacotes de saída"
+
+msgid "При задержке 250 мс и больше звук может отставать. При потере больше 10% пакетов голос может искажаться. Если проблема не исчезает, отключитесь и подключитесь снова."
+msgstr "Com 250 ms ou mais, o som pode atrasar. Com mais de 10% de perda de pacotes, sua voz pode distorcer. Se o problema continuar, desconecte e conecte de novo."
+
+msgid "Код приватности голоса"
+msgstr "Código de privacidade de voz"
+
+msgid "Сравните этот код с собеседниками: одинаковый код значит, что между вами никого нет."
+msgstr "Compare este código com os outros: se for igual, não há ninguém no meio."
+
+msgid "Защищено сквозным шифрованием"
+msgstr "Protegido por criptografia de ponta a ponta"
+
+msgid "Без сквозного шифрования"
+msgstr "Sem criptografia de ponta a ponta"

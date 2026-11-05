@@ -183,6 +183,7 @@ impl Call {
         }
         let (Some(token), Some(endpoint)) = (data["token"].as_str(), data["endpoint"].as_str()) else { return };
         self.server = Some((token.to_string(), endpoint.to_string()));
+        crate::voiceping::set_server(endpoint);
         self.connecting = false; // a new server (Discord moved the call): connect again
         self.try_connect();
     }
@@ -255,6 +256,7 @@ impl Call {
 
 impl Drop for Call {
     fn drop(&mut self) {
+        crate::voiceping::reset();
         self.driver.leave();
         if !self.silent_leave {
             let _ = self.gateway.send(voice_state(self.guild_id.as_deref(), None, false, false));

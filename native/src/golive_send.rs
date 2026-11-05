@@ -474,10 +474,11 @@ pub fn sender_report(ssrc: u32, ntp_ms: u64, rtp_timestamp: u32, packets: u32, o
     p
 }
 
-/// The encoder's bitrate for the server's estimate: a little under it, never below a floor
-/// where the picture is useless, never above the stream's own ceiling.
+/// The encoder's bitrate for the server's estimate: all of it, since blocks cost more than the odd resend;
+/// above it the server loses most of what comes. Never below a floor where the picture is useless,
+/// never above the stream's own ceiling.
 pub fn adapt_bitrate(remb: u64, ceiling: u64) -> u64 {
-    (remb / 10 * 9).clamp(500_000.min(ceiling), ceiling)
+    remb.clamp(500_000.min(ceiling), ceiling)
 }
 
 // ---------------------------------------------------------------- DAVE
@@ -732,6 +733,10 @@ impl Stream {
             }
             "STREAM_DELETE" => {
                 crate::log_line(&format!("go live send: STREAM_DELETE {}", short(&redacted(data))));
+                // Our own earlier stream being closed as this one begins: this one has not even been created yet.
+                if data["reason"].as_str() == Some("user_requested") && self.rtc_server_id.is_none() {
+                    return false;
+                }
                 self.live.store(false, Ordering::Relaxed);
                 if let Some(task) = self.task.take() {
                     task.abort();
@@ -843,6 +848,9 @@ struct SendStats {
     first_error: Option<String>,
     /// The most that waited to go out since the last report, in bytes: what holds frames up.
     peak_waiting: std::cell::Cell<usize>,
+    /// What had gone out at the last report, and when: for the real rate.
+    reported: std::cell::Cell<Option<(Instant, u64)>>,
+    video_bytes: u64,
 }
 
 /// How many sent packets are kept for retransmission.
@@ -936,6 +944,7 @@ impl Media {
             self.stats.keyframes += 1;
         }
         self.stats.peak_waiting.set(self.stats.peak_waiting.get().max(self.outbox_bytes));
+        self.stats.video_bytes += payload_frame.len() as u64;
         self.pump();
     }
 
@@ -1060,8 +1069,10 @@ impl Media {
 
     fn report(&self) -> String {
         let s = &self.stats;
+        let now = Instant::now();
+        let kbps = s.reported.replace(Some((now, s.video_bytes))).map_or(0, |(at, bytes)| (s.video_bytes - bytes) * 8 / 1000 / now.duration_since(at).as_secs().max(1));
         format!(
-            "sent {} frames ({} keyframes), {} packets, {} resent, {} sound frames; dropped before DAVE was ready {}, DAVE failed {}; keyframe requests {}; most waiting {} KB; DAVE {}",
+            "sent {} frames ({} keyframes), {} packets, {} resent, {} sound frames; dropped before DAVE was ready {}, DAVE failed {}; keyframe requests {}; most waiting {} KB; {kbps} kbps of {}; DAVE {}",
             s.frames,
             s.keyframes,
             s.packets,
@@ -1071,6 +1082,7 @@ impl Media {
             s.dave_failed,
             s.keyframe_requests,
             s.peak_waiting.take() / 1024,
+            if self.last_bitrate > 0 { self.last_bitrate } else { self.params.max_bitrate } / 1000,
             if self.dave.on() { "on" } else { "off" }
         )
     }
@@ -1434,7 +1446,8 @@ mod tests {
     #[test]
     fn bitrate_follows_the_estimate_within_limits() {
         assert_eq!(adapt_bitrate(10_000_000, 8_000_000), 8_000_000);
-        assert_eq!(adapt_bitrate(4_000_000, 8_000_000), 3_600_000);
+        assert_eq!(adapt_bitrate(4_000_000, 8_000_000), 4_000_000);
+        assert_eq!(adapt_bitrate(9_000_000, 12_000_000), 9_000_000, "the server's word is the limit");
         assert_eq!(adapt_bitrate(100_000, 8_000_000), 500_000);
         assert_eq!(adapt_bitrate(1, 300_000), 300_000, "a low ceiling wins over the floor");
     }

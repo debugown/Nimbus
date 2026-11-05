@@ -56,6 +56,8 @@ mod search;
 mod servers;
 mod unread;
 mod userprofile;
+mod voiceping;
+mod gifcache;
 mod changelog;
 mod hwenc;
 mod share;
@@ -727,6 +729,37 @@ fn set_tray(on: bool) {
     }
 }
 
+/// A maximized window that is dragged: Windows doesn't move it, so it goes back to its usual size first,
+/// with the same part of the title bar under the cursor.
+fn restore_under_cursor(ui: &AppWindow) {
+    use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use slint::winit_030::WinitWindowAccessor;
+    use windows::Win32::Foundation::{HWND, POINT, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowPlacement, GetWindowRect, SetWindowPos, ShowWindow, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WINDOWPLACEMENT};
+    let hwnd = ui
+        .window()
+        .with_winit_window(|w| match w.window_handle().ok()?.as_raw() {
+            RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+            _ => None,
+        })
+        .flatten();
+    let Some(hwnd) = hwnd else { return };
+    let hwnd = HWND(hwnd as *mut _);
+    let (mut cursor, mut big) = (POINT::default(), RECT::default());
+    let mut place = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+    unsafe {
+        if GetCursorPos(&mut cursor).is_err() || GetWindowRect(hwnd, &mut big).is_err() || GetWindowPlacement(hwnd, &mut place).is_err() {
+            return;
+        }
+        let width = place.rcNormalPosition.right - place.rcNormalPosition.left;
+        let share = (cursor.x - big.left) as f32 / (big.right - big.left).max(1) as f32;
+        let x = cursor.x - (width as f32 * share) as i32;
+        let y = cursor.y - (16.0 * ui.window().scale_factor()) as i32;
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
 thread_local! {
     static MOVED_WINDOW: RefCell<Option<slint::Weak<AppWindow>>> = const { RefCell::new(None) };
     static MOVED_TIMER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -804,6 +837,9 @@ fn setup_system(ui: &AppWindow) {
         let weak = ui.as_weak();
         ui.on_window_drag(move || {
             if let Some(ui) = weak.upgrade() {
+                if ui.window().is_maximized() {
+                    restore_under_cursor(&ui);
+                }
                 ui.window().with_winit_window(|w| {
                     let _ = w.drag_window();
                 });
@@ -841,6 +877,7 @@ fn setup_system(ui: &AppWindow) {
     let weak = ui.as_weak();
     let timer = slint::Timer::default();
     let last_tick = std::cell::Cell::new(Instant::now());
+    let ticks = std::cell::Cell::new(0u32);
     timer.start(slint::TimerMode::Repeated, Duration::from_millis(200), move || {
         // Late by much: the window was busy all that time and didn't answer.
         let gap = last_tick.replace(Instant::now()).elapsed();
@@ -854,6 +891,24 @@ fn setup_system(ui: &AppWindow) {
             let minimized = ui.window().with_winit_window(|w| w.is_minimized().unwrap_or(false)).unwrap_or(false);
             WINDOW_SHOWN.store(ui.window().is_visible() && !minimized, std::sync::atomic::Ordering::Relaxed);
             CALL_SHOWN.store(ui.get_show_call() && ui.get_voice_channel() != "", std::sync::atomic::Ordering::Relaxed);
+            // Once a second, while in voice.
+            ticks.set(ticks.get().wrapping_add(1));
+            if ticks.get() % 5 == 0 && ui.get_voice_connected() {
+                let shown = voiceping::tick();
+                ui.set_voice_stats(VoiceStats {
+                    last: shown.last as i32,
+                    average: shown.average as i32,
+                    path: shown.path.into(),
+                    top: shown.top as i32,
+                    start: shown.start.into(),
+                    end: shown.end.into(),
+                    server: shown.server.into(),
+                    has_loss: shown.loss.is_some(),
+                    loss: format!("{:.1}", shown.loss.unwrap_or(0.0)).into(),
+                    encrypted: shown.encrypted,
+                    code: shown.code.into(),
+                });
+            }
         }
         while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
             match &ids {
@@ -1780,6 +1835,16 @@ pub fn set_stream_watched(ui: &AppWindow, id: &str, on: bool) {
     });
 }
 
+/// About how wide a stream's picture is on screen, in real pixels: no wider than the window
+/// up on the stage, and its share of the window on a tile.
+pub fn stream_shown_width(ui: &AppWindow, id: &str) -> u32 {
+    let window = ui.window().size().width;
+    if ui.get_watched_identity() == id && !ui.get_call_grid() {
+        return window;
+    }
+    window / (ui.get_call_tiles().row_count().max(1) as f32).sqrt().ceil() as u32
+}
+
 /// The newest picture of a stream: on its tile, and on the stage while it is up there.
 pub fn show_stream_picture(ui: &AppWindow, id: &str, picture: Image) {
     if ui.get_watched_identity() == id {
@@ -2164,6 +2229,8 @@ fn show_emoji_images(ui: &AppWindow, pictures: &HashMap<String, Image>) -> HashS
 struct Images {
     http: reqwest::Client,
     cache: Mutex<HashMap<String, Option<Pixels>>>,
+    /// Animated pictures once decoded, so a chat opened again doesn't start them over.
+    gifs: Mutex<gifcache::Kept<Vec<(Pixels, u32)>>>,
 }
 
 impl Images {
@@ -2191,9 +2258,36 @@ impl Images {
     /// All frames of an animated GIF, scaled to `w`×`h`, with their delays in ms.
     /// `max_frames`: 0 for the usual limit.
     async fn frames(&self, url: String, w: u32, h: u32, max_frames: usize) -> Option<Vec<(Pixels, u32)>> {
-        let bytes = self.download(&url, MAX_GIF_BYTES).await?;
         let max_frames = if max_frames == 0 { MAX_GIF_FRAMES } else { max_frames.min(MAX_GIF_FRAMES) };
-        tokio::task::spawn_blocking(move || decode_gif(&bytes, w, h, max_frames)).await.ok().flatten()
+        let key = format!("{}#{w}x{h}#{max_frames}", gifcache::key(&url));
+        if let Some(hit) = self.gifs.lock().unwrap().get(&key) {
+            return Some(hit);
+        }
+        let bytes = self.animated_file(&url).await?;
+        let frames = tokio::task::spawn_blocking(move || decode_gif(&bytes, w, h, max_frames)).await.ok().flatten()?;
+        let size = frames.iter().map(|(px, _)| px.width() as usize * px.height() as usize * 4).sum();
+        self.gifs.lock().unwrap().put(key, frames.clone(), size);
+        Some(frames)
+    }
+
+    /// An animated file: the copy on disk when there is one, else downloaded and kept.
+    async fn animated_file(&self, url: &str) -> Option<bytes::Bytes> {
+        let saved = gifcache::path_of(url, is_trusted_media_host(url));
+        if let Some(path) = &saved {
+            if let Ok(bytes) = tokio::fs::read(path).await {
+                if !bytes.is_empty() {
+                    return Some(bytes::Bytes::from(bytes));
+                }
+            }
+        }
+        let bytes = self.download(url, MAX_GIF_BYTES).await?;
+        if let Some(path) = saved {
+            if let Some(dir) = path.parent() {
+                let _ = tokio::fs::create_dir_all(dir).await;
+            }
+            let _ = tokio::fs::write(path, &bytes).await;
+        }
+        Some(bytes)
     }
 
     async fn download(&self, url: &str, max_bytes: u64) -> Option<bytes::Bytes> {
@@ -2324,9 +2418,9 @@ fn log_line(text: &str) {
     }
 }
 
-/// The log is written only when asked for (the NIMBUS_LOG variable), to look into a problem.
+/// The log is written only when asked for, to look into a problem: the NIMBUS_LOG variable, or a file nimbus-native.log.on in the temp folder.
 fn logging() -> bool {
-    static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("NIMBUS_LOG").is_some());
+    static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("NIMBUS_LOG").is_some() || std::env::temp_dir().join("nimbus-native.log.on").exists());
     *ON
 }
 
@@ -3313,6 +3407,11 @@ fn preload_chats(api: Api, pages: Arc<Mutex<pages::Pages>>, chats: Vec<String>) 
     });
 }
 
+/// How many channels' member lists are kept for coming back; how long an answer is waited for, and how many more times it is asked.
+const MEMBER_LISTS_KEPT: usize = 20;
+const MEMBER_ASK_AFTER: Duration = Duration::from_secs(3);
+const MEMBER_ASKS_AGAIN: u8 = 3;
+
 /// A row of the right panel: kind, id, name, subtitle, status, colour, avatar url, avatar frame url, nameplate url, nameplate palette.
 type MemberRow = (i32, String, String, String, i32, Option<u32>, String, Option<String>, Option<String>, String);
 
@@ -3682,6 +3781,14 @@ struct Worker {
     /// The member list on the right, and the server it belongs to.
     members: members::List,
     members_guild: Option<String>,
+    /// Our earlier gateway sessions in this run.
+    past_sessions: Vec<String>,
+    /// The channel whose list we are subscribed to: (server, channel).
+    members_channel: Option<(String, String)>,
+    /// The lists of channels seen lately, shown at once on coming back while the fresh one is on its way.
+    members_kept: HashMap<String, members::List>,
+    /// When the list was asked for and how many more times since, while nothing has come.
+    members_asked: Option<(Instant, u8)>,
     /// The group whose people are in the right panel, and those rows.
     group_shown: Option<(String, Vec<MemberRow>)>,
     /// How many chunks of 100 the member list was asked for.
@@ -3838,6 +3945,10 @@ impl Worker {
             }
             Event::Home(kind, data) => self.on_home_event(&kind, data),
             Event::Chat(kind, data) => self.on_chat_event(&kind, data),
+            Event::Resumed => on_ui(&self.ui, |ui| {
+                ui.set_status("".into());
+                ui.set_online(true);
+            }),
             Event::Status(text) => on_ui(&self.ui, move |ui| {
                 ui.set_status(text.into());
                 ui.set_online(false);
@@ -4165,6 +4276,10 @@ impl Worker {
                 note_user(&r["user"]);
                 self.users.insert(id.to_string(), r["user"].clone());
             }
+        }
+        // Voice states may still name the session this replaces: those are not another client.
+        if let Some(old) = self.ready["session_id"].as_str() {
+            self.past_sessions.push(old.to_string());
         }
         self.ready = data;
 
@@ -4529,7 +4644,65 @@ impl Worker {
 
     /// Brings every unread pill and mention count on screen up to date:
     /// server icons, and the channels or DMs of the open list.
+    /// The chats waiting for us, on the rail under the DM button, newest first. Muted ones wait quietly in the list.
+    fn refresh_dm_alerts(&self) {
+        let open = self.dm_ids();
+        let waiting: Vec<&String> = open.iter().filter(|c| self.unread.mentions(c) > 0 && !self.unread.muted(c)).collect();
+        let private = self.ready["private_channels"].as_array().cloned().unwrap_or_default();
+        let look = home::Look { name: &display_name, avatar: &avatar_url, cdn: CDN };
+        let alerts: Vec<(String, String, i32, Option<String>)> = if waiting.is_empty() {
+            Vec::new()
+        } else {
+            home::dm_rows(&private, &self.presences, &self.me_name, &look)
+                .into_iter()
+                .filter(|dm| waiting.contains(&&dm.id))
+                .map(|dm| {
+                    let mentions = self.unread.mentions(&dm.id) as i32;
+                    (dm.id, readable(&dm.name), mentions, dm.avatar_url)
+                })
+                .collect()
+        };
+        let pictures: Vec<(String, String)> = alerts.iter().filter_map(|(id, _, _, url)| Some((id.clone(), url.clone()?))).collect();
+        on_ui(&self.ui, move |ui| {
+            let old = ui.get_dm_alerts();
+            let kept = |id: &str| old.iter().find(|a| a.id.as_str() == id);
+            let items: Vec<GuildItem> = alerts
+                .into_iter()
+                .map(|(id, name, mentions, _)| {
+                    let was = kept(&id);
+                    GuildItem {
+                        initials: name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default().into(),
+                        id: id.into(),
+                        name: name.into(),
+                        icon: was.as_ref().map(|w| w.icon.clone()).unwrap_or_default(),
+                        has_icon: was.as_ref().is_some_and(|w| w.has_icon),
+                        unread: true,
+                        mentions,
+                        ..Default::default()
+                    }
+                })
+                .collect();
+            ui.set_dm_alerts(ModelRc::new(VecModel::from(items)));
+        });
+        let (images, ui) = (self.images.clone(), self.ui.clone());
+        tokio::spawn(async move {
+            for (id, url) in pictures {
+                let Some(px) = images.get(url, GUILD_ICON_PX, GUILD_ICON_PX).await else { continue };
+                on_ui(&ui, move |ui| {
+                    let model = ui.get_dm_alerts();
+                    if let Some(row) = model.iter().position(|a| a.id.as_str() == id && !a.has_icon) {
+                        update_row(model, row, |a| {
+                            a.icon = Image::from_rgba8(px);
+                            a.has_icon = true;
+                        });
+                    }
+                });
+            }
+        });
+    }
+
     fn refresh_badges(&self) {
+        self.refresh_dm_alerts();
         let mut badges: HashMap<String, unread::Badge> = HashMap::new();
         badges.insert(HOME.into(), self.unread.dms(&self.dm_ids()));
         for gid in self.guild_names.keys() {
@@ -4668,7 +4841,8 @@ impl Worker {
     async fn on_voice_state(&mut self, data: Value) {
         // We joined voice from another client, say the official app: only one can hold it, so this one leaves.
         let session = self.ready["session_id"].as_str().unwrap_or("");
-        if self.voice_channel.is_some() && discord_voice::taken_elsewhere(&data, &self.me_id, session) {
+        let ours_before = data["session_id"].as_str().is_some_and(|s| self.past_sessions.iter().any(|old| old == s));
+        if self.voice_channel.is_some() && !ours_before && discord_voice::taken_elsewhere(&data, &self.me_id, session) {
             log_line("voice: another client of this account joined voice, leaving here");
             self.voice_channel = None;
             self.ring_pending = None;
@@ -5396,6 +5570,10 @@ impl Worker {
     /// A channel's messages: the newest, or those around one message (a search hit).
     async fn open_messages(&mut self, id: String, around: Option<String>) -> Result<(), String> {
         self.channel = Some(id.clone());
+        let plain_channel = self.channels.get(&id).is_some_and(|c| !c.dm && !c.forum) && !self.thread_ids.contains(&id);
+        if plain_channel {
+            self.watch_members(&id, true).await;
+        }
         if self.channels.get(&id).is_some_and(|c| c.forum) {
             self.watch_members(&id, false).await;
             return self.open_forum(id).await;
@@ -5759,6 +5937,19 @@ impl Worker {
     /// or hides it where there is none (DMs, forums, no access).
     async fn watch_members(&mut self, channel: &str, show: bool) {
         let guild = self.guild.clone().filter(|g| g != HOME && show);
+        // Already asked for, as the chat began to open.
+        if show && guild.is_some() && self.members_channel.as_ref().is_some_and(|(g, c)| Some(g) == guild.as_ref() && c == channel) {
+            return;
+        }
+        // The list we leave is kept, and Discord told to stop: it tells again when we come back.
+        if let Some((old_guild, old_channel)) = self.members_channel.take() {
+            let _ = self.gateway.send(members::unsubscribe(&old_guild, &old_channel));
+            if self.members_kept.len() >= MEMBER_LISTS_KEPT {
+                self.members_kept.clear();
+            }
+            self.members_kept.insert(old_channel, std::mem::take(&mut self.members));
+        }
+        self.members_asked = None;
         let Some(guild) = guild else {
             self.members.clear();
             self.members_guild = None;
@@ -5780,17 +5971,39 @@ impl Worker {
             names::note_roles(&roles);
             self.role_tables.insert(guild.clone(), members::role_table(&roles));
         }
-        self.members.clear();
+        self.members = self.members_kept.remove(channel).unwrap_or_default();
         self.member_chunks = members::FIRST_CHUNKS;
         if self.members_guild.as_deref() != Some(guild.as_str()) {
             self.role_of.clear();
         }
         self.members_guild = Some(guild.clone());
-        on_ui(&self.ui, |ui| {
-            ui.set_members_open(true);
-            ui.set_members(ModelRc::new(VecModel::from(Vec::<MemberItem>::new())));
-        });
+        self.members_channel = Some((guild.clone(), channel.to_string()));
+        self.members_asked = Some((Instant::now(), 0));
+        on_ui(&self.ui, |ui| ui.set_members_open(true));
+        // What we had of this list goes up at once; the panel doesn't stand empty meanwhile.
+        if self.members.progress().0 > 0 {
+            self.show_members();
+        } else {
+            on_ui(&self.ui, |ui| ui.set_members(ModelRc::new(VecModel::from(Vec::<MemberItem>::new()))));
+        }
         let _ = self.gateway.send(members::subscribe(&guild, channel, members::FIRST_CHUNKS));
+    }
+
+    /// Nothing came for the list: asked again from scratch a few times, so a lost answer doesn't leave it empty.
+    fn ask_members_again(&mut self) {
+        let Some((at, tries)) = self.members_asked else { return };
+        if self.members.progress().0 > 0 || tries >= MEMBER_ASKS_AGAIN {
+            self.members_asked = None;
+            return;
+        }
+        if at.elapsed() < MEMBER_ASK_AFTER {
+            return;
+        }
+        let Some((guild, channel)) = self.members_channel.clone() else { return };
+        log_line(&format!("member list: nothing came, asking again ({})", tries + 1));
+        let _ = self.gateway.send(members::unsubscribe(&guild, &channel));
+        let _ = self.gateway.send(members::subscribe(&guild, &channel, members::FIRST_CHUNKS));
+        self.members_asked = Some((Instant::now(), tries + 1));
     }
 
     /// A group's people beside it, as a server's are, those online first. Drawn again only when something in it changed.
@@ -9216,6 +9429,7 @@ fn push_privacy(ui: &Weak<AppWindow>, settings: &Value) {
 fn forget_token() {
     clear_message_cache(false);
     pages::forget_recent();
+    gifcache::clear();
     let _ = keyring::Entry::new("nimbus-client", "discord-token").and_then(|e| e.delete_credential());
 }
 
@@ -9263,7 +9477,7 @@ async fn run_once(ui: Weak<AppWindow>, cmds: &mut UnboundedReceiver<Cmd>, saved:
         }
     };
     discord::AUTH_LOST.store(false, std::sync::atomic::Ordering::Relaxed);
-    let images = Arc::new(Images { http: api.http.clone(), cache: Mutex::new(HashMap::new()) });
+    let images = Arc::new(Images { http: api.http.clone(), cache: Mutex::new(HashMap::new()), gifs: Mutex::new(gifcache::Kept::new(gifcache::MEMORY_BYTES)) });
     let _ = VOICE_AVATARS.set(VoiceAvatars {
         images: images.clone(),
         ui: ui.clone(),
@@ -9376,6 +9590,10 @@ async fn run_once(ui: Weak<AppWindow>, cmds: &mut UnboundedReceiver<Cmd>, saved:
         gateway: members_gateway,
         members: members::List::default(),
         members_guild: None,
+        past_sessions: Vec::new(),
+        members_channel: None,
+        members_kept: HashMap::new(),
+        members_asked: None,
         group_shown: None,
         role_tables: HashMap::new(),
         discord_voice: HashMap::new(),
@@ -9458,6 +9676,7 @@ async fn run_once(ui: Weak<AppWindow>, cmds: &mut UnboundedReceiver<Cmd>, saved:
             Some(event) = events.recv() => worker.on_event(event).await,
             Some(cmd) = cmds.recv() => worker.on_cmd(cmd).await,
             _ = home_tick.tick() => {
+                worker.ask_members_again();
                 if std::mem::take(&mut worker.home_dirty) {
                     worker.refresh_home();
                 }
@@ -11707,6 +11926,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // The streaming server (LiveKit and the token service) runs as long as Nimbus does, but only when
     // switched on ("own_server": true in the settings); calls and Go Live work through Discord without it.
     clear_message_cache(true);
+    gifcache::tidy();
     let own_server = prefs::read()["own_server"].as_bool().unwrap_or(false);
     if !own_server {
         log_line("voice server: off (Discord voice only)");

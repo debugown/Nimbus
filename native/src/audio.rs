@@ -53,9 +53,14 @@ pub const SAMPLE_RATE: u32 = 48_000;
 const FRAME: usize = (SAMPLE_RATE / 100) as usize;
 /// How much of a speaker's audio may wait before the oldest is dropped,
 /// so a hiccup never turns into lasting delay.
-const MAX_QUEUED: usize = FRAME * 20;
+const MAX_QUEUED: usize = FRAME * 30;
 /// A speaker's audio starts playing once this much has arrived (jitter cushion).
 const START_QUEUED: usize = FRAME * 4;
+/// Someone who keeps running dry in the middle of their sound (music has no pauses to hide it in) gets a bigger
+/// cushion, a step at a time up to this. A pause in speech is longer than `UNDERRUN_WITHIN`, and changes nothing.
+const MAX_CUSHION: usize = FRAME * 14;
+const CUSHION_STEP: usize = FRAME * 2;
+const UNDERRUN_WITHIN: Duration = Duration::from_millis(150);
 /// WASAPI buffer length, in 100 ns units.
 const DEVICE_BUFFER: i64 = 400_000;
 /// Which of Windows' defaults is used: the ordinary one. A mic opened through
@@ -724,6 +729,32 @@ struct Queue {
     playing: bool,
     /// For a stream's sound: whose stream. It plays only while that stream is watched.
     stream_of: Option<String>,
+    /// How much must wait before it starts, once it has run dry mid-sound; 0: the usual.
+    cushion: usize,
+    /// When it last ran dry.
+    dry_at: Option<Instant>,
+}
+
+impl Queue {
+    /// Before a frame is mixed: starts playing when enough has come. Coming back quickly means it wasn't a pause.
+    fn try_start(&mut self, now: Instant) {
+        if self.playing {
+            return;
+        }
+        let need = self.cushion.max(START_QUEUED);
+        if self.samples.len() < need {
+            return;
+        }
+        self.playing = true;
+        if self.dry_at.take().is_some_and(|at| now.duration_since(at) < UNDERRUN_WITHIN) {
+            self.cushion = (need + CUSHION_STEP).min(MAX_CUSHION);
+        }
+    }
+
+    fn ran_dry(&mut self, now: Instant) {
+        self.playing = false;
+        self.dry_at = Some(now);
+    }
 }
 
 /// Counters for checks.
@@ -1208,6 +1239,7 @@ unsafe fn record(shared: &Shared, id: Option<&str>, stop: &AtomicBool) -> window
 /// Fills one 10 ms frame with everyone's audio, mixed.
 fn mix(shared: &Shared, out: &mut [i16]) {
     let mut sum = [0i32; FRAME];
+    let now = Instant::now();
     let watched = shared.watched.lock().unwrap().clone();
     // During the microphone check only the check is heard, as if the headphones were off for the call.
     let testing = LOOPBACK.load(Ordering::Relaxed);
@@ -1223,9 +1255,7 @@ fn mix(shared: &Shared, out: &mut [i16]) {
             queue.playing = false;
             continue;
         }
-        if !queue.playing {
-            queue.playing = queue.samples.len() >= START_QUEUED;
-        }
+        queue.try_start(now);
         if !queue.playing {
             continue;
         }
@@ -1234,7 +1264,7 @@ fn mix(shared: &Shared, out: &mut [i16]) {
         }
         // Ran dry: wait for a fresh cushion instead of crackling.
         if queue.samples.is_empty() {
-            queue.playing = false;
+            queue.ran_dry(now);
         }
     }
     let deafened = shared.deafened.load(Ordering::Relaxed) && !testing;
@@ -1451,6 +1481,47 @@ unsafe fn play_samples(samples: &[i16], at: &AtomicU64, id: Option<&str>, stop: 
 mod tests {
     use super::*;
 
+    #[test]
+    fn running_dry_mid_sound_grows_the_cushion_but_a_pause_does_not() {
+        let start = Instant::now();
+        let mut q = Queue::default();
+        q.samples.extend(vec![0i16; START_QUEUED]);
+        q.try_start(start);
+        assert!(q.playing);
+        assert_eq!(q.cushion, 0, "the first start changes nothing");
+
+        // Dry, and back at once: music that came late.
+        q.samples.clear();
+        q.ran_dry(start);
+        q.samples.extend(vec![0i16; START_QUEUED]);
+        q.try_start(start + Duration::from_millis(40));
+        assert!(q.playing);
+        assert_eq!(q.cushion, START_QUEUED + CUSHION_STEP);
+
+        // Now it waits for more before starting.
+        q.samples.clear();
+        q.ran_dry(start);
+        q.samples.extend(vec![0i16; START_QUEUED]);
+        q.try_start(start + Duration::from_millis(10));
+        assert!(!q.playing);
+
+        // A pause between words: back after a while, the cushion stays as it was.
+        let before = q.cushion;
+        q.samples.extend(vec![0i16; before]);
+        q.try_start(start + Duration::from_secs(1));
+        assert!(q.playing);
+        assert_eq!(q.cushion, before);
+
+        // Never past the limit.
+        for _ in 0..50 {
+            q.samples.clear();
+            q.ran_dry(start);
+            q.samples.extend(vec![0i16; MAX_CUSHION]);
+            q.try_start(start);
+        }
+        assert_eq!(q.cushion, MAX_CUSHION);
+        assert!(MAX_CUSHION < MAX_QUEUED);
+    }
     #[test]
     fn manual_gate_opens_above_threshold_and_holds() {
         let p = Processing { auto_threshold: false, threshold: -40, ..Processing::DEFAULT };

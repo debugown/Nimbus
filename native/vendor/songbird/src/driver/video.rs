@@ -39,6 +39,9 @@ pub const RTX_PAYLOAD_TYPE: u8 = 102;
 /// video, client disconnect, client flags, client platform).
 const SHARED_OPS: [u64; 6] = [2, 11, 12, 13, 18, 20];
 
+/// How long the voice gateway took to answer the last heartbeat, in ms; 0 when not known.
+pub static LAST_PING_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// What the driver tells the owner of a [`VideoLink`].
 pub enum VideoEvent {
     /// The voice connection is up: what sending on it needs.

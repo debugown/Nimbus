@@ -25,6 +25,16 @@ use windows::Win32::System::Variant::VARIANT;
 /// holds up the ones behind it for a moment, so they are rare: whoever joins or loses packets asks for one.
 const KEYFRAME_SECONDS: u32 = 30;
 
+/// What a hard moment may take, for an average bitrate.
+fn peak_of(bitrate: u64) -> u32 {
+    (bitrate / 10 * 12).min(u32::MAX as u64) as u32
+}
+
+/// The encoder's buffer, in bits: half a second, so a frame may be well above the average.
+fn buffer_of(bitrate: u64) -> u32 {
+    (bitrate / 2).min(u32::MAX as u64) as u32
+}
+
 /// A frame waiting to be encoded.
 pub struct Input {
     /// Shared so the capture side can keep the last frame to repeat it.
@@ -93,7 +103,7 @@ impl Encoder {
 }
 
 /// Starts a hardware encoder for `width`×`height` frames whose output goes to `source`.
-pub fn start(width: u32, height: u32, fps: u32, bitrate: u64, source: NativeVideoSource) -> Result<Encoder, String> {
+pub fn start(width: u32, height: u32, fps: u32, bitrate: u64, source: NativeVideoSource, high: bool) -> Result<Encoder, String> {
     if std::env::var_os("NIMBUS_SOFTWARE_ENCODER").is_some() {
         return Err("аппаратное кодирование выключено (NIMBUS_SOFTWARE_ENCODER)".into());
     }
@@ -109,7 +119,7 @@ pub fn start(width: u32, height: u32, fps: u32, bitrate: u64, source: NativeVide
     std::thread::Builder::new()
         .name("hw-encoder".into())
         .spawn(move || {
-            let setup = unsafe { Mft::open(width, height, fps, bitrate) };
+            let setup = unsafe { Mft::open(width, height, fps, bitrate, high) };
             match setup {
                 Ok(mft) => {
                     let _ = ready_tx.send(Ok(mft.name.clone()));
@@ -143,7 +153,7 @@ fn err(context: &str, e: windows::core::Error) -> String {
 }
 
 impl Mft {
-    unsafe fn open(width: u32, height: u32, fps: u32, bitrate: u64) -> Result<Self, String> {
+    unsafe fn open(width: u32, height: u32, fps: u32, bitrate: u64, high: bool) -> Result<Self, String> {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(|e| err("MFStartup", e))?;
@@ -200,7 +210,9 @@ impl Mft {
             // LiveKit's pass-through negotiates Constrained Baseline (42e01f);
             // viewers drop anything else. Baseline from these encoders has no
             // FMO/ASO, so it is constrained in practice.
-            out_type.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32).map_err(|e| err("profile", e))?;
+            // A stream only for Discord may use High: much better for the same bitrate.
+            let profile = if high { eAVEncH264VProfile_High } else { eAVEncH264VProfile_Base };
+            out_type.SetUINT32(&MF_MT_MPEG2_PROFILE, profile.0 as u32).map_err(|e| err("profile", e))?;
             transform.SetOutputType(0, &out_type, 0).map_err(|e| err("SetOutputType", e))?;
 
             let in_type = MFCreateMediaType().map_err(|e| err("MFCreateMediaType", e))?;
@@ -215,8 +227,13 @@ impl Mft {
             // Steady bitrate and no frame reordering: what live streaming wants.
             if let Some(codec) = &codec {
                 let _ = codec.SetValue(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true));
-                let _ = codec.SetValue(&CODECAPI_AVEncCommonRateControlMode, &VARIANT::from(eAVEncCommonRateControlMode_CBR.0 as u32));
+                // The average holds, and a hard moment may take more for a while: with a steady rate and the short
+                // buffer of low latency, every fast scene falls apart into blocks. Encoders that don't take it stay as they were.
+                let _ = codec.SetValue(&CODECAPI_AVEncCommonRateControlMode, &VARIANT::from(eAVEncCommonRateControlMode_PeakConstrainedVBR.0 as u32));
                 let _ = codec.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bitrate.min(u32::MAX as u64) as u32));
+                let _ = codec.SetValue(&CODECAPI_AVEncCommonMaxBitRate, &VARIANT::from(peak_of(bitrate)));
+                let _ = codec.SetValue(&CODECAPI_AVEncCommonBufferSize, &VARIANT::from(buffer_of(bitrate)));
+
                 let _ = codec.SetValue(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(gop));
                 if std::env::var_os("NIMBUS_LOG_KEYFRAMES").is_some() {
                     let read = codec.GetValue(&CODECAPI_AVEncMPVGOPSize).map(|value| format!("{value:?}"));
@@ -276,6 +293,8 @@ impl Mft {
                     if bps > 0 {
                         if let Some(codec) = &self.codec {
                             let _ = codec.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bps.min(u32::MAX as u64) as u32));
+                            let _ = codec.SetValue(&CODECAPI_AVEncCommonMaxBitRate, &VARIANT::from(peak_of(bps)));
+                            let _ = codec.SetValue(&CODECAPI_AVEncCommonBufferSize, &VARIANT::from(buffer_of(bps)));
                         }
                     }
                     let sample = make_sample(&frame.nv12, frame.timestamp_us * 10, frame_duration)?;

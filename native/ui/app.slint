@@ -613,6 +613,22 @@ export struct NotifyMenuInfo {
 }
 
 // Settings → Внешний вид, Специальные возможности, Язык и время.
+// How the Discord voice connection is doing; `last` 0 while nothing is measured (the Nimbus room has no such data).
+export struct VoiceStats {
+    last: int,
+    average: int,
+    // The line of the chart, in a 300 by 80 box; `top` the delay at its upper edge.
+    path: string,
+    top: int,
+    start: string,
+    end: string,
+    server: string,
+    has-loss: bool,
+    loss: string,
+    encrypted: bool,
+    code: string,
+}
+
 // A line of the changelog. kind: 0 version, 1 section, 2 item, 3 plain text.
 export struct ChangelogLine {
     kind: int,
@@ -7697,9 +7713,19 @@ component TitleBar inherits Rectangle {
     callback install-update();
     height: 32px;
     background: Theme.pane0;
+    // The window moves once the mouse does, so a double click isn't taken for a drag (it would un-maximize the window).
     TouchArea {
+        property <bool> dragging;
         pointer-event(e) => {
-            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left { root.drag(); }
+            if e.kind == PointerEventKind.down {
+                self.dragging = false;
+            }
+        }
+        moved => {
+            if (self.pressed && self.pressed-x != -1px && !self.dragging && (abs(self.mouse-x - self.pressed-x) > 3px || abs(self.mouse-y - self.pressed-y) > 3px)) {
+                self.dragging = true;
+                root.drag();
+            }
         }
         double-clicked => { root.maximize(); }
     }
@@ -7803,6 +7829,8 @@ export component AppWindow inherits Window {
     in property <string> window-title: "Nimbus";
     in property <[GuildItem]> guilds;
     in property <[RailItem]> rail;
+    // Chats with new messages for us: on the rail under the DM button until they are read. `id` is the channel.
+    in-out property <[GuildItem]> dm-alerts;
     in property <[ChannelItem]> channels;
     in property <[MessageItem]> messages;
     // in-out so a click highlights right away, before the network answers.
@@ -8089,6 +8117,7 @@ export component AppWindow inherits Window {
     function save-panel-widths() {
         root.panel-widths-saved(root.sidebar-width / 1px, root.members-width / 1px, root.dm-panel-width / 1px);
     }
+    in property <VoiceStats> voice-stats;
     // Someone's badges, the one to show first.
     in-out property <bool> badges-open;
     in-out property <UserCardItem> badges-card;
@@ -8590,7 +8619,8 @@ export component AppWindow inherits Window {
     property <bool> rail-dragging;
     property <length> rail-drag-y;
     // The pointer's place on the rail, in lines; the first line (messages) stays first.
-    property <float> rail-drag-line: (root.rail-drag-y - rail-list.y - rail-list.content-y) / 48px;
+    property <length> rail-alerts-h: root.dm-alerts.length * 48px;
+    property <float> rail-drag-line: (root.rail-drag-y - rail-list.y - rail-list.content-y - root.rail-alerts-h) / 48px;
     property <int> rail-drop-row: clamp(floor(root.rail-drag-line), 1, max(1, root.rail.length - 1));
     property <float> rail-drop-part: clamp(root.rail-drag-line - root.rail-drop-row, 0, 1);
     property <int> rail-drop-zone: root.rail-drag.folder ? (root.rail-drop-part < 0.5 ? 0 : 2)
@@ -8616,46 +8646,72 @@ export component AppWindow inherits Window {
                 add-area := TouchArea { mouse-cursor: pointer; clicked => { root.open-join(""); } }
                 Icon { width: 22px; height: 22px; commands: Icons.plus; tint: add-area.has-hover ? #fff : #23a55a; }
             }
-            rail-list := ListView {
+            rail-list := Flickable {
                 height: parent.height - 56px - root.dock-height;
                 y: root.client-hidden ? 10px : 0px;
                 animate y { delay: 160ms; duration: root.client-in; easing: ease-out; }
-                for r in root.rail: GuildButton {
-                    item: r.item;
-                    selected: r.selected || r.item.id == root.selected-guild;
-                    folder: r.folder;
-                    open: r.open;
-                    inside: r.inside;
-                    last: r.last;
-                    thumbs: r.thumbs;
-                    draggable: r.item.id != "@me";
-                    opacity: root.rail-dragging && root.rail-drag.item.id == r.item.id ? 0.35 : 1;
-                    menu(x, y) => {
-                        if (r.item.id != "@me" && !r.folder) {
-                            root.open-notify-menu(r.item.id, "", x, y);
+                interactive: false;
+                content-height: rail-body.preferred-height;
+                rail-body := VerticalLayout {
+                    width: 72px;
+                    // The DM button, the chats waiting under it, then the servers.
+                    for g[i] in root.guilds: GuildButton {
+                        visible: i == 0;
+                        height: i == 0 ? 48px : 0px;
+                        item: g;
+                        selected: g.id == root.selected-guild;
+                        clicked => {
+                            root.selected-guild = g.id;
+                            root.people-page = 0;
+                            root.forum-open = false;
+                            root.guild-clicked(g.id);
                         }
                     }
-                    clicked => {
-                        if (r.folder) {
-                            root.rail-toggle(r.item.id);
-                            return;
+                    for a in root.dm-alerts: GuildButton {
+                        item: a;
+                        menu(x, y) => { root.open-dm-menu(a.id, x, y); }
+                        clicked => { root.toast-open("", a.id); }
+                    }
+                    // The rail's first line is the DM button, drawn above.
+                    for r[i] in root.rail: GuildButton {
+                        visible: i > 0;
+                        height: i > 0 ? 48px : 0px;
+                        item: r.item;
+                        selected: r.selected || r.item.id == root.selected-guild;
+                        folder: r.folder;
+                        open: r.open;
+                        inside: r.inside;
+                        last: r.last;
+                        thumbs: r.thumbs;
+                        draggable: r.item.id != "@me";
+                        opacity: root.rail-dragging && root.rail-drag.item.id == r.item.id ? 0.35 : 1;
+                        menu(x, y) => {
+                            if (r.item.id != "@me" && !r.folder) {
+                                root.open-notify-menu(r.item.id, "", x, y);
+                            }
                         }
-                        root.selected-guild = r.item.id;
-                        root.people-page = 0;
-                        root.forum-open = false;
-                        root.guild-clicked(r.item.id);
-                    }
-                    drag-begin => {
-                        root.rail-drag = r;
-                        root.rail-dragging = true;
-                    }
-                    drag-at(x, y) => {
-                        root.rail-drag-y = y - rail-box.absolute-position.y;
-                    }
-                    drag-end(drop) => {
-                        root.rail-dragging = false;
-                        if (drop) {
-                            root.rail-drop(r.item.id, root.rail-drop-row, root.rail-drop-zone);
+                        clicked => {
+                            if (r.folder) {
+                                root.rail-toggle(r.item.id);
+                                return;
+                            }
+                            root.selected-guild = r.item.id;
+                            root.people-page = 0;
+                            root.forum-open = false;
+                            root.guild-clicked(r.item.id);
+                        }
+                        drag-begin => {
+                            root.rail-drag = r;
+                            root.rail-dragging = true;
+                        }
+                        drag-at(x, y) => {
+                            root.rail-drag-y = y - rail-box.absolute-position.y;
+                        }
+                        drag-end(drop) => {
+                            root.rail-dragging = false;
+                            if (drop) {
+                                root.rail-drop(r.item.id, root.rail-drop-row, root.rail-drop-zone);
+                            }
                         }
                     }
                 }
@@ -8663,7 +8719,7 @@ export component AppWindow inherits Window {
             // Where it will land: a ring around a line to go into, or a bar between two lines.
             if root.rail-dragging && root.rail-drop-zone == 1: Rectangle {
                 x: 12px;
-                y: rail-list.y + rail-list.content-y + 48px * root.rail-drop-row;
+                y: rail-list.y + rail-list.content-y + root.rail-alerts-h + 48px * root.rail-drop-row;
                 width: 48px;
                 height: 48px;
                 border-radius: 14px;
@@ -8672,7 +8728,7 @@ export component AppWindow inherits Window {
             }
             if root.rail-dragging && root.rail-drop-zone != 1: Rectangle {
                 x: 12px;
-                y: rail-list.y + rail-list.content-y + 48px * (root.rail-drop-row + (root.rail-drop-zone == 2 ? 1 : 0)) - 1px;
+                y: rail-list.y + rail-list.content-y + root.rail-alerts-h + 48px * (root.rail-drop-row + (root.rail-drop-zone == 2 ? 1 : 0)) - 1px;
                 width: 48px;
                 height: 3px;
                 border-radius: 2px;
@@ -8906,11 +8962,33 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             padding-right: 6px;
                             alignment: center;
-                            Icon {
-                                commands: Icons.signal;
-                                tint: root.voice-error != "" ? #f04a55 : (root.voice-connected ? Theme.green : #f0b232);
-                                width: 18px;
-                                height: 18px;
+                            Rectangle {
+                                width: 24px;
+                                height: 24px;
+                                border-radius: 6px;
+                                background: signal-area.has-hover && root.voice-connected ? Theme.hover : transparent;
+                                signal-area := TouchArea {
+                                    enabled: root.voice-connected;
+                                    mouse-cursor: pointer;
+                                    clicked => { connection-popup.show(); }
+                                }
+                                Icon {
+                                    commands: Icons.signal;
+                                    tint: root.voice-error != "" ? #f04a55 : (root.voice-connected ? (root.voice-stats.last >= 250 ? #f0b232 : Theme.green) : #f0b232);
+                                    width: 18px;
+                                    height: 18px;
+                                }
+                                if signal-area.has-hover && root.voice-connected && root.voice-stats.last > 0: Rectangle {
+                                    x: 0;
+                                    y: -34px;
+                                    width: ping-hint.preferred-width + 16px;
+                                    height: 28px;
+                                    border-radius: 6px;
+                                    background: Theme.popup;
+                                    border-width: 1px;
+                                    border-color: Theme.line;
+                                    ping-hint := Text { text: root.voice-stats.last + " ms"; color: Theme.text; font-size: 12px; font-weight: 600; }
+                                }
                             }
                         }
                         VerticalLayout {
@@ -10733,6 +10811,86 @@ export component AppWindow inherits Window {
             root.confirm-user = root.user-menu.id;
             root.confirm-name = root.user-menu.name;
             root.confirm-action = a;
+        }
+    }
+
+    // Over the signal icon: how the voice connection is doing.
+    connection-popup := PopupWindow {
+        property <int> tab;
+        x: 8px;
+        y: max(36px, root.height - self.height - 150px);
+        width: 310px;
+        height: connection-body.preferred-height;
+        close-policy: close-on-click-outside;
+        Rectangle {
+            background: Theme.popup;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.line;
+            drop-shadow-blur: 18px;
+            drop-shadow-color: Theme.shadow;
+            connection-body := VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+                HorizontalLayout {
+                    spacing: 16px;
+                    alignment: start;
+                    for label[i] in [@tr("" => "Подключение"), @tr("" => "Конфиденциальность")]: Rectangle {
+                        width: connection-tab.preferred-width;
+                        height: 28px;
+                        connection-tab-area := TouchArea { mouse-cursor: pointer; clicked => { connection-popup.tab = i; } }
+                        connection-tab := Text { y: 0; height: 22px; text: label; color: connection-popup.tab == i || connection-tab-area.has-hover ? Theme.text : Theme.text2; font-size: 13px; font-weight: 600; vertical-alignment: center; }
+                        if connection-popup.tab == i: Rectangle { y: parent.height - 2px; height: 2px; background: Theme.text; }
+                    }
+                }
+                if connection-popup.tab == 0: Rectangle {
+                    height: 110px;
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: parent.width - 30px;
+                        height: 88px;
+                        border-radius: 4px;
+                        background: Theme.card;
+                        Path {
+                            y: 4px;
+                            width: parent.width;
+                            height: 80px;
+                            viewbox-width: 300;
+                            viewbox-height: 80;
+                            commands: root.voice-stats.path;
+                            stroke: Theme.text;
+                            stroke-width: 1.5px;
+                            fill: transparent;
+                        }
+                    }
+                    Text { x: parent.width - 26px; y: 0; text: root.voice-stats.top; color: Theme.muted; font-size: 11px; }
+                    Text { x: parent.width - 26px; y: 74px; text: "0"; color: Theme.muted; font-size: 11px; }
+                    Text { x: 0; y: 92px; text: root.voice-stats.start; color: Theme.muted; font-size: 11px; }
+                    Text { x: parent.width - 30px - self.width; y: 92px; text: root.voice-stats.end; color: Theme.muted; font-size: 11px; }
+                }
+                if connection-popup.tab == 0 && root.voice-stats.server != "": Text { text: root.voice-stats.server; color: Theme.text; font-size: 14px; font-weight: 700; overflow: elide; }
+                if connection-popup.tab == 0: VerticalLayout {
+                    spacing: 3px;
+                    Text { text: @tr("" => "Средняя задержка") + ": " + (root.voice-stats.average > 0 ? root.voice-stats.average + " ms" : "—"); color: Theme.text2; font-size: 12.5px; font-weight: 600; }
+                    Text { text: @tr("" => "Последняя задержка") + ": " + (root.voice-stats.last > 0 ? root.voice-stats.last + " ms" : "—"); color: Theme.text2; font-size: 12.5px; font-weight: 600; }
+                    Text { text: @tr("" => "Потеря исходящих пакетов") + ": " + (root.voice-stats.has-loss ? root.voice-stats.loss + "%" : "—"); color: Theme.text2; font-size: 12.5px; font-weight: 600; }
+                }
+                if connection-popup.tab == 0: Text { text: @tr("" => "При задержке 250 мс и больше звук может отставать. При потере больше 10% пакетов голос может искажаться. Если проблема не исчезает, отключитесь и подключитесь снова."); color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+                if connection-popup.tab == 1 && root.voice-stats.code != "": VerticalLayout {
+                    spacing: 4px;
+                    Text { text: @tr("" => "Код приватности голоса"); color: Theme.text2; font-size: 12.5px; font-weight: 700; }
+                    Text { text: root.voice-stats.code; color: Theme.text; font-size: 13px; wrap: word-wrap; }
+                }
+                if connection-popup.tab == 1: Text { text: @tr("" => "Сравните этот код с собеседниками: одинаковый код значит, что между вами никого нет."); color: Theme.muted; font-size: 12px; wrap: word-wrap; visible: root.voice-stats.code != ""; height: root.voice-stats.code != "" ? self.preferred-height : 0px; }
+                Rectangle {
+                    height: 30px;
+                    border-radius: 6px;
+                    background: Theme.card;
+                    Icon { x: 8px; width: 15px; height: 15px; commands: root.voice-stats.encrypted ? Icons.check : Icons.close; tint: root.voice-stats.encrypted ? Theme.green : Theme.muted; }
+                    Text { x: 30px; width: parent.width - 36px; height: parent.height; text: root.voice-stats.encrypted ? @tr("" => "Защищено сквозным шифрованием") : @tr("" => "Без сквозного шифрования"); color: root.voice-stats.encrypted ? Theme.green : Theme.muted; font-size: 12px; font-weight: 600; vertical-alignment: center; overflow: elide; }
+                }
+            }
         }
     }
 

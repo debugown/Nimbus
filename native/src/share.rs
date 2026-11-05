@@ -176,7 +176,7 @@ pub struct Prepared {
 }
 
 /// Picks the encoder: the GPU's if Windows has one, else WebRTC's software one.
-pub fn prepare(what: Source, quality: Quality) -> Result<Prepared, String> {
+pub fn prepare(what: Source, quality: Quality, high: bool) -> Result<Prepared, String> {
     let (w, h) = what.size()?;
     let (width, height) = quality.fit(w, h);
     let fps = quality.fps.max(1);
@@ -185,7 +185,7 @@ pub fn prepare(what: Source, quality: Quality) -> Result<Prepared, String> {
     crate::log_line(&format!("screen share: {what:?} {w}x{h} -> {width}x{height} @{fps} {max_bitrate}bps"));
 
     let encoded = NativeVideoSource::new_encoded(resolution.clone());
-    let (source, encoder, encoder_name) = match hwenc::start(width, height, fps, max_bitrate, encoded.clone()) {
+    let (source, encoder, encoder_name) = match hwenc::start(width, height, fps, max_bitrate, encoded.clone(), high) {
         Ok(encoder) => {
             let name = encoder.name.clone();
             crate::log_line(&format!("screen share: hardware encoder {name}"));
@@ -215,7 +215,7 @@ pub struct Target {
 /// Gets a small picture of the shared screen now and then.
 /// The picture, the height of what is sent, and how many frames a second really go out.
 pub type Preview = Arc<dyn Fn(crate::Pixels, u32, u32) + Send + Sync>;
-const PREVIEW_EVERY: Duration = Duration::from_millis(16);
+const PREVIEW_EVERY: Duration = Duration::from_millis(33);
 const PREVIEW_WIDTH: u32 = 1280;
 
 /// The capture hands raw frames to a thread of its own, which makes the small pictures, so the
@@ -266,6 +266,8 @@ struct Output {
     prepared: Prepared,
     started: Instant,
     frames: Arc<AtomicU64>,
+    /// Frames the encoder had no room for, since the last look.
+    refused: AtomicU64,
     last: Mutex<(Option<Held>, Instant)>,
 }
 
@@ -277,6 +279,8 @@ impl Output {
         last.1 = Instant::now();
         if sent {
             self.frames.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.refused.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -379,6 +383,8 @@ struct Capture {
 /// is drawing on, which is the kind of thing that shows up as small stutters.
 struct Readback {
     staging: Option<ID3D11Texture2D>,
+    /// This thread and its GPU work have been put first.
+    raised: bool,
     width: u32,
     height: u32,
     format: DXGI_FORMAT,
@@ -386,7 +392,7 @@ struct Readback {
 
 impl Readback {
     fn new() -> Self {
-        Self { staging: None, width: 0, height: 0, format: DXGI_FORMAT::default() }
+        Self { staging: None, raised: false, width: 0, height: 0, format: DXGI_FORMAT::default() }
     }
 
     /// The frame's rows as BGRA without padding, into `out` (replacing what was there); its width and height.
@@ -396,6 +402,14 @@ impl Readback {
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             texture.GetDesc(&mut desc);
             let device = texture.GetDevice()?;
+            // A game at full load starves the capture for seconds: this thread and its GPU work go first.
+            if !self.raised {
+                self.raised = true;
+                let _ = windows::Win32::System::Threading::SetThreadPriority(windows::Win32::System::Threading::GetCurrentThread(), windows::Win32::System::Threading::THREAD_PRIORITY_HIGHEST);
+                if let Ok(dxgi) = device.cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>() {
+                    let _ = dxgi.SetGPUThreadPriority(7);
+                }
+            }
             let context = device.GetImmediateContext()?;
             if self.staging.is_none() || (self.width, self.height, self.format) != (desc.Width, desc.Height, desc.Format) {
                 let staging = D3D11_TEXTURE2D_DESC {
@@ -454,7 +468,7 @@ impl Timing {
     }
 
     /// `readback`, `converted` and `total` are measured from the start of the callback.
-    fn add(&mut self, readback: Duration, converted: Duration, total: Duration) {
+    fn add(&mut self, readback: Duration, converted: Duration, total: Duration, refused: &AtomicU64) {
         self.frames += 1;
         self.readback += readback;
         self.convert += converted.saturating_sub(readback);
@@ -468,13 +482,14 @@ impl Timing {
             let n = self.frames.max(1);
             let ms = |d: Duration| d.as_secs_f64() * 1000.0 / n as f64;
             crate::log_line(&format!(
-                "capture: {} frames in 5 s; per frame {:.1} ms (off the GPU {:.1}, convert {:.1}); slowest {:.1} ms; widest gap {:.1} ms",
+                "capture: {} frames in 5 s; per frame {:.1} ms (off the GPU {:.1}, convert {:.1}); slowest {:.1} ms; widest gap {:.1} ms; encoder had no room for {}",
                 self.frames,
                 ms(self.total),
                 ms(self.readback),
                 ms(self.convert),
                 self.slowest.as_secs_f64() * 1000.0,
-                self.widest.as_secs_f64() * 1000.0
+                self.widest.as_secs_f64() * 1000.0,
+                refused.swap(0, Ordering::Relaxed)
             ));
             let last = self.last;
             *self = Self::new();
@@ -571,7 +586,7 @@ impl GraphicsCaptureApiHandler for Capture {
         self.scratch = scratch;
         let converted = now.elapsed();
         self.flags.out.send(held);
-        self.timing.add(readback, converted, now.elapsed());
+        self.timing.add(readback, converted, now.elapsed(), &self.flags.out.refused);
         Ok(())
     }
 
@@ -608,7 +623,7 @@ pub fn start(target: Target) -> Result<(), String> {
     });
     let interval = Duration::from_micros(1_000_000 / prepared.fps as u64);
     let what = prepared.what;
-    let out = Arc::new(Output { prepared, started: Instant::now(), frames, last: Mutex::new((None, Instant::now())) });
+    let out = Arc::new(Output { prepared, started: Instant::now(), frames, refused: AtomicU64::new(0), last: Mutex::new((None, Instant::now())) });
 
     let (repeat_out, repeat_stop) = (out.clone(), stop.clone());
     std::thread::Builder::new()

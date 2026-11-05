@@ -319,6 +319,24 @@ pub(crate) fn feedback(ours: u32, media: u32, highest_seq: u32, lost: u32, max_b
     p
 }
 
+/// What we want of the stream: everything, in its full size. Without a size the server
+/// has only our silence to go on, as it shows us with 0 for our own stream that nobody displays.
+fn sink_wants(video_ssrc: u32, pixels: u64) -> Value {
+    if video_ssrc == 0 {
+        return json!({ "any": 100 });
+    }
+    json!({ "any": 100, "pixelCounts": { (video_ssrc.to_string()): pixels } })
+}
+
+/// The picture size a stream announces, in pixels.
+fn announced_pixels(media: &Value) -> u64 {
+    let size = &media["streams"][0]["max_resolution"];
+    match size["width"].as_u64().unwrap_or(0) * size["height"].as_u64().unwrap_or(0) {
+        0 => 1920 * 1080,
+        pixels => pixels,
+    }
+}
+
 pub(crate) const START_CODE: [u8; 4] = [0, 0, 0, 1];
 
 /// What the assembler hands on: a whole frame, or word that one was lost.
@@ -516,6 +534,8 @@ struct State {
     assembler: Assembler,
     video: VideoStats,
     decoder: crate::h264dec::Decoder,
+    /// The stream's full size, as it announced it.
+    wanted_pixels: u64,
     /// Our SSRC (from READY) and the streamer's video SSRC (from op 12), for keyframe requests.
     our_ssrc: u32,
     video_ssrc: u32,
@@ -794,6 +814,7 @@ async fn run(link: Link, status: Status) -> Result<(), String> {
     let display = link.display.clone();
     let mut state = State {
         decoder: crate::h264dec::Decoder::start(Box::new(move |pixels| display(pixels))),
+        wanted_pixels: 0,
         link,
         seq_ack: -1,
         udp: None,
@@ -821,6 +842,7 @@ async fn run(link: Link, status: Status) -> Result<(), String> {
     let (udp_tx, mut udp_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     // Packets per (ssrc, payload type) since the last report.
     let mut counts: HashMap<(u32, u8), u64> = HashMap::new();
+    let mut video_bytes = 0u64;
 
     loop {
         let mut out: Outgoing = Vec::new();
@@ -852,6 +874,9 @@ async fn run(link: Link, status: Status) -> Result<(), String> {
                 state.on_udp(&packet);
                 if packet.len() >= 12 {
                     let pt = packet[1] & 0x7f;
+                    if pt == H264_PT || pt == RTX_PT {
+                        video_bytes += packet.len() as u64;
+                    }
                     let ssrc = u32::from_be_bytes([packet[8], packet[9], packet[10], packet[11]]);
                     // RTCP shares the socket; its "payload types" land in 72..=76 after masking.
                     let key = if (72..=76).contains(&pt) { (0, pt) } else { (ssrc, pt) };
@@ -876,7 +901,8 @@ async fn run(link: Link, status: Status) -> Result<(), String> {
                 if !counts.is_empty() {
                     let mut parts: Vec<String> = counts.iter().map(|((ssrc, pt), n)| format!("ssrc {ssrc} pt {pt}: {n}")).collect();
                     parts.sort();
-                    crate::log_line(&format!("go live: udp in 3 s: {}", parts.join(", ")));
+                    crate::log_line(&format!("go live: udp in 3 s: {}; video {} kbps", parts.join(", "), video_bytes * 8 / 3000));
+                    video_bytes = 0;
                     crate::log_line(&format!("go live: {}", state.video_report()));
                     counts.clear();
                 }
@@ -967,7 +993,7 @@ async fn on_json(
                 out.push(binary_msg(26, &package));
             }
             // Ask for video: without this the server may send none.
-            out.push(json_msg(15, json!({ "any": 100 })));
+            out.push(json_msg(15, sink_wants(state.video_ssrc, state.wanted_pixels)));
             status(crate::i18n::tf("подключено, видео {}", &[&d["video_codec"].as_str().unwrap_or("?")]));
         }
         6 => {} // heartbeat ack
@@ -978,6 +1004,8 @@ async fn on_json(
             }
             if let Some(ssrc) = d["video_ssrc"].as_u64().filter(|&s| s != 0) {
                 state.video_ssrc = ssrc as u32;
+                state.wanted_pixels = announced_pixels(d);
+                out.push(json_msg(15, sink_wants(state.video_ssrc, state.wanted_pixels)));
                 state.request_keyframe();
             }
         }
@@ -1204,6 +1232,19 @@ mod tests {
         let exp = (remb[17] >> 2) as u32;
         let mantissa = (((remb[17] & 3) as u32) << 16) | ((remb[18] as u32) << 8) | remb[19] as u32;
         assert_eq!((mantissa as u64) << exp, 20_000_000 >> exp << exp);
+    }
+}
+
+#[cfg(test)]
+mod sink_tests {
+    use super::*;
+
+    #[test]
+    fn the_server_hears_how_big_we_want_the_stream() {
+        assert_eq!(sink_wants(0, 0), json!({ "any": 100 }));
+        assert_eq!(sink_wants(2969, 921_600), json!({ "any": 100, "pixelCounts": { "2969": 921_600 } }));
+        assert_eq!(announced_pixels(&json!({ "streams": [{ "max_resolution": { "width": 1280, "height": 720 } }] })), 921_600);
+        assert_eq!(announced_pixels(&json!({ "streams": [] })), 1920 * 1080);
     }
 }
 

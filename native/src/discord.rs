@@ -33,6 +33,8 @@ pub enum Event {
     VoiceState(Value),
     /// Where our own Discord voice call is served (after we ask to join).
     VoiceServer(Value),
+    /// The broken connection was picked up again, with nothing lost.
+    Resumed,
     /// STREAM_CREATE / STREAM_SERVER_UPDATE / STREAM_DELETE (Go Live), by event name.
     Stream(String, Value),
     /// Changes on the DM side: DMs created/updated/deleted, friends and
@@ -481,8 +483,9 @@ const CONTEXT_USER_MENU: &str = "eyJsb2NhdGlvbiI6IkNvbnRleHRNZW51In0=";
 /// Keeps a gateway session alive, forwards the events we care about and
 /// sends what `outgoing` brings (voice state updates).
 pub async fn run_gateway(token: String, events: UnboundedSender<Event>, mut outgoing: UnboundedReceiver<Value>) {
+    let mut resume: Option<Resume> = None;
     loop {
-        if let Err(e) = session(&token, &events, &mut outgoing).await {
+        if let Err(e) = session(&token, &events, &mut outgoing, &mut resume).await {
             crate::log_line(&format!("gateway: {e}"));
             crate::log_line(&format!("gateway: no connection: {e}"));
             let _ = events.send(Event::Status(crate::i18n::tf("Нет связи: {}", &[&e])));
@@ -491,8 +494,27 @@ pub async fn run_gateway(token: String, events: UnboundedSender<Event>, mut outg
         if events.is_closed() || AUTH_LOST.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // A session that can go on is picked up quickly: voice and streams hang on it.
+        tokio::time::sleep(Duration::from_secs(if resume.is_some() { 1 } else { 5 })).await;
     }
+}
+
+/// What it takes to go on with a session after the connection broke, instead of starting a new one.
+/// A new session throws us out of voice, and any stream with it.
+struct Resume {
+    session_id: String,
+    url: String,
+    seq: Value,
+}
+
+/// The gateway's address to come back to, as our connection needs it.
+fn resume_address(url: &str) -> String {
+    format!("{}/?v=10&encoding=json", url.trim_end_matches('/'))
+}
+
+/// Close codes after which the session can't be picked up again.
+fn session_is_over(code: u16) -> bool {
+    matches!(code, 4004 | 4007 | 4009 | 4010..=4014)
 }
 
 /// What others see of us: the status and the custom status line, as the gateway takes them. Kept here so that
@@ -504,8 +526,9 @@ pub fn presence(status: &str, custom: &str) -> Value {
     json!({ "status": status, "since": 0, "activities": activities, "afk": false })
 }
 
-async fn session(token: &str, events: &UnboundedSender<Event>, outgoing: &mut UnboundedReceiver<Value>) -> Result<()> {
-    let ws = connect_gateway().await?;
+async fn session(token: &str, events: &UnboundedSender<Event>, outgoing: &mut UnboundedReceiver<Value>, resume: &mut Option<Resume>) -> Result<()> {
+    let address = resume.as_ref().map(|r| resume_address(&r.url));
+    let ws = connect_gateway(address.as_deref()).await?;
     let (mut tx, mut rx) = ws.split();
 
     let hello = loop {
@@ -525,9 +548,13 @@ async fn session(token: &str, events: &UnboundedSender<Event>, outgoing: &mut Un
             "compress": false,
         }
     });
-    tx.send(Message::Text(identify.to_string())).await.map_err(err)?;
+    let first = match resume.as_ref() {
+        Some(r) => json!({ "op": 6, "d": { "token": token, "session_id": r.session_id, "seq": r.seq } }),
+        None => identify,
+    };
+    tx.send(Message::Text(first.to_string())).await.map_err(err)?;
 
-    let mut seq = Value::Null;
+    let mut seq = resume.as_ref().map_or(Value::Null, |r| r.seq.clone());
     let mut beat_sent: Option<std::time::Instant> = None;
     let mut heartbeat = tokio::time::interval(Duration::from_millis(interval));
     heartbeat.tick().await;
@@ -549,6 +576,9 @@ async fn session(token: &str, events: &UnboundedSender<Event>, outgoing: &mut Un
                         if frame.as_ref().is_some_and(|f| u16::from(f.code) == 4004) {
                             AUTH_LOST.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
+                        if frame.as_ref().is_some_and(|f| session_is_over(u16::from(f.code))) {
+                            *resume = None;
+                        }
                         return Err(format!("closed by server: {frame:?}"));
                     }
                     _ => continue,
@@ -556,12 +586,25 @@ async fn session(token: &str, events: &UnboundedSender<Event>, outgoing: &mut Un
                 let mut payload: Value = serde_json::from_str(&text).map_err(err)?;
                 if !payload["s"].is_null() {
                     seq = payload["s"].clone();
+                    if let Some(r) = resume.as_mut() {
+                        r.seq = seq.clone();
+                    }
                 }
                 match payload["op"].as_u64() {
                     Some(0) => {
                         let data = payload["d"].take();
                         let event = match payload["t"].as_str() {
-                            Some("READY") => Some(Event::Ready(data)),
+                            Some("READY") => {
+                                *resume = match (data["session_id"].as_str(), data["resume_gateway_url"].as_str()) {
+                                    (Some(session_id), Some(url)) => Some(Resume { session_id: session_id.to_string(), url: url.to_string(), seq: seq.clone() }),
+                                    _ => None,
+                                };
+                                Some(Event::Ready(data))
+                            }
+                            Some("RESUMED") => {
+                                crate::log_line("gateway: session picked up again");
+                                Some(Event::Resumed)
+                            }
                             Some("MESSAGE_CREATE") => Some(Event::MessageCreate(data)),
                             Some("VOICE_STATE_UPDATE") => Some(Event::VoiceState(data)),
                             Some("VOICE_SERVER_UPDATE") => Some(Event::VoiceServer(data)),
@@ -597,7 +640,13 @@ async fn session(token: &str, events: &UnboundedSender<Event>, outgoing: &mut Un
                         }
                     }
                     Some(7) => return Err("server requested reconnect".into()),
-                    Some(9) => return Err("invalid session".into()),
+                    Some(9) => {
+                        // `d` says whether it may still be picked up.
+                        if payload["d"].as_bool() != Some(true) {
+                            *resume = None;
+                        }
+                        return Err("invalid session".into());
+                    }
                     _ => {}
                 }
             }
@@ -610,7 +659,7 @@ type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStre
 /// Opens the gateway: through the proxy this PC is set to use (as a browser would), then directly if that fails.
 /// The first connection to Discord that worked only through a proxy was the pages and pictures; the gateway
 /// is a different kind of connection, which has to be told about the proxy by hand.
-async fn connect_gateway() -> Result<Socket> {
+async fn connect_gateway(address: Option<&str>) -> Result<Socket> {
     if let Some(proxy) = system_proxy() {
         match tokio::time::timeout(Duration::from_secs(15), connect_via_proxy(&proxy)).await {
             Ok(Ok(ws)) => {
@@ -621,7 +670,7 @@ async fn connect_gateway() -> Result<Socket> {
             Err(_) => crate::log_line(&format!("gateway: the proxy {proxy} did not answer in time; trying directly")),
         }
     }
-    let (ws, _) = tokio::time::timeout(Duration::from_secs(20), connect_async(GATEWAY))
+    let (ws, _) = tokio::time::timeout(Duration::from_secs(20), connect_async(address.unwrap_or(GATEWAY)))
         .await
         .map_err(|_| "Discord did not answer in 20 s (blocked network?)".to_string())?
         .map_err(err)?;
@@ -731,6 +780,14 @@ pub fn friendly(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_goes_on_unless_discord_says_otherwise() {
+        assert_eq!(resume_address("wss://gateway-us-east1-c.discord.gg/"), "wss://gateway-us-east1-c.discord.gg/?v=10&encoding=json");
+        assert!(!session_is_over(1006));
+        assert!(!session_is_over(4000));
+        assert!(session_is_over(4004) && session_is_over(4009));
+    }
 
     #[test]
     fn internal_addresses_are_recognised() {

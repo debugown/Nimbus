@@ -24,6 +24,12 @@ pub fn subscribe(guild: &str, channel: &str, chunks: usize) -> Value {
     })
 }
 
+/// The message that stops it. Discord tells a list once per subscription: without this, coming back to a
+/// channel asked for earlier brings nothing at all.
+pub fn unsubscribe(guild: &str, channel: &str) -> Value {
+    json!({ "op": 14, "d": { "guild_id": guild, "channels": { channel: [] } } })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     Group {
@@ -257,6 +263,14 @@ pub fn group_name(id: &str, table: &HashMap<String, Role>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leaving_a_channel_asks_for_no_ranges_of_it() {
+        let off = unsubscribe("g", "c");
+        assert_eq!(off["op"], 14);
+        assert_eq!(off["d"]["guild_id"], "g");
+        assert_eq!(off["d"]["channels"]["c"], json!([]));
+    }
 
     fn member(id: &str, status: &str) -> Value {
         json!({ "member": { "user": { "id": id, "username": id }, "roles": ["r1"], "presence": { "status": status, "activities": [{ "type": 4, "state": "дома" }] } } })

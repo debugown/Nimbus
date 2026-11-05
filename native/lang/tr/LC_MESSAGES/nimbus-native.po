@@ -1859,3 +1859,33 @@ msgstr "Nimbus güncellendi"
 
 msgid "Что нового"
 msgstr "Yenilikler"
+
+msgid "Подключение"
+msgstr "Bağlantı"
+
+msgid "Конфиденциальность"
+msgstr "Gizlilik"
+
+msgid "Средняя задержка"
+msgstr "Ortalama gecikme"
+
+msgid "Последняя задержка"
+msgstr "Son gecikme"
+
+msgid "Потеря исходящих пакетов"
+msgstr "Giden paket kaybı"
+
+msgid "При задержке 250 мс и больше звук может отставать. При потере больше 10% пакетов голос может искажаться. Если проблема не исчезает, отключитесь и подключитесь снова."
+msgstr "250 ms ve üzerinde ses gecikebilir. %10'dan fazla paket kaybında sesin bozulabilir. Sorun devam ederse bağlantıyı kesip yeniden bağlan."
+
+msgid "Код приватности голоса"
+msgstr "Ses gizlilik kodu"
+
+msgid "Сравните этот код с собеседниками: одинаковый код значит, что между вами никого нет."
+msgstr "Bu kodu diğerleriyle karşılaştır: aynıysa aranızda kimse yok demektir."
+
+msgid "Защищено сквозным шифрованием"
+msgstr "Uçtan uca şifreleme ile korunuyor"
+
+msgid "Без сквозного шифрования"
+msgstr "Uçtan uca şifreleme yok"

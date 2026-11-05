@@ -393,7 +393,7 @@ fn watch_stream(ui: &Weak<AppWindow>, gateway: &UnboundedSender<Value>, s: &Sess
             return;
         }
         *last = Some(Instant::now());
-        show_latest(&frame_ui, &latest, &who, pixels);
+        show_latest(&frame_ui, &latest, &who, fit_to_shown(pixels, latest.shown_width.load(Ordering::Relaxed)));
     });
     let sound = s.audio.lock().unwrap().sink();
     Some(crate::golive::Watch::start(gateway.clone(), guild, channel, id, &s.identity, session_id, status, display, sound))
@@ -647,7 +647,8 @@ pub async fn run(ui: Weak<AppWindow>, http: reqwest::Client, mut cmds: Unbounded
                     let status: crate::golive_send::Status = Arc::new(move |text: String| {
                         crate::log_line(&format!("go live send: {text}"));
                         if text.starts_with(&crate::i18n::tf("ошибка: {}", &[])) || text == crate::i18n::t("стрим закрыт") {
-                            report(&status_ui, crate::i18n::tf("Показ на Discord: {}", &[&text]));
+                            let said = crate::i18n::tf("Показ на Discord: {}", &[&text]);
+                            on_ui(&status_ui, move |ui| ui.set_notice(said.into()));
                         }
                     });
                     // A window that closes ends its share the same way the button does.
@@ -678,6 +679,10 @@ pub async fn run(ui: Weak<AppWindow>, http: reqwest::Client, mut cmds: Unbounded
                         Ok(sharing) => {
                             s.share = Some(sharing);
                             shared.sharing.store(true, Ordering::Relaxed);
+                            // Our own stream shows on its tile by itself, with no click on "Watch".
+                            shared.preview_on.store(true, Ordering::Relaxed);
+                            let me = s.identity.clone();
+                            on_ui(&ui, move |ui| crate::set_stream_watched(&ui, &me, true));
                         }
                         Err(e) => report(&ui, e),
                     }
@@ -949,7 +954,7 @@ fn camera_on(ui: &Weak<AppWindow>, s: &mut Session, devices: &Devices, rig: &mut
     let mode = running.capture.mode;
     let (width, height) = (mode.width & !1, mode.height & !1);
     let source = livekit::webrtc::video_source::native::NativeVideoSource::new_encoded(livekit::webrtc::video_source::VideoResolution { width, height });
-    let encoder = crate::hwenc::start(width, height, mode.fps, crate::discord_video::START_BITRATE, source).map_err(|e| {
+    let encoder = crate::hwenc::start(width, height, mode.fps, crate::discord_video::START_BITRATE, source, false).map_err(|e| {
         crate::log_line(&format!("camera: no hardware encoder ({e})"));
         crate::i18n::t("Для камеры нужен аппаратный кодировщик H.264 (NVIDIA, AMD или Intel)")
     })?;
@@ -1266,7 +1271,7 @@ async fn start_share(
         let (height, fps) = crate::golive_send::cap_quality(quality.height, quality.fps, crate::golive_send::premium());
         quality = share::Quality { height, fps, ..quality };
     }
-    let prepared = share::prepare(source, quality)?;
+    let prepared = share::prepare(source, quality, !to.room())?;
     // What Discord gets is the GPU encoder's own H.264; WebRTC's software encoder is not reachable.
     let handle = prepared.encoder.as_ref().map(|e| e.handle());
     if discord.is_some() && handle.is_none() {
@@ -1387,6 +1392,35 @@ fn spawn_viewer(ui: &Weak<AppWindow>, track: RemoteVideoTrack, identity: String,
 struct Latest {
     slot: Mutex<Option<Pixels>>,
     queued: AtomicBool,
+    /// About how wide the picture is on screen, in real pixels; 0 until it has been shown.
+    shown_width: AtomicU32,
+}
+
+/// Halves a picture until it is less than twice as wide as its place on screen. Further down
+/// the renderer skips pixels, and fine detail turns into jagged blocks.
+fn fit_to_shown(mut pixels: Pixels, shown_width: u32) -> Pixels {
+    while shown_width > 0 && pixels.width() >= shown_width * 2 {
+        pixels = halved(&pixels);
+    }
+    pixels
+}
+
+/// Half the size, each new pixel the average of the four it replaces.
+fn halved(pixels: &Pixels) -> Pixels {
+    let (w, h) = (pixels.width() as usize / 2, pixels.height() as usize / 2);
+    let stride = pixels.width() as usize * 4;
+    let from = pixels.as_bytes();
+    let mut small = Pixels::new(w as u32, h as u32);
+    for (y, row) in small.make_mut_bytes().chunks_exact_mut(w * 4).enumerate() {
+        let (upper, lower) = (&from[y * 2 * stride..], &from[(y * 2 + 1) * stride..]);
+        for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+            for (c, out) in pixel.iter_mut().enumerate() {
+                let (a, b) = (x * 8 + c, x * 8 + 4 + c);
+                *out = ((upper[a] as u32 + upper[b] as u32 + lower[a] as u32 + lower[b] as u32 + 2) / 4) as u8;
+            }
+        }
+    }
+    small
 }
 
 fn show_latest(ui: &Weak<AppWindow>, latest: &Arc<Latest>, who: &str, pixels: Pixels) {
@@ -1397,6 +1431,7 @@ fn show_latest(ui: &Weak<AppWindow>, latest: &Arc<Latest>, who: &str, pixels: Pi
     let (latest, who) = (latest.clone(), who.to_string());
     on_ui(ui, move |ui| {
         latest.queued.store(false, Ordering::Release);
+        latest.shown_width.store(crate::stream_shown_width(&ui, &who), Ordering::Relaxed);
         if let Some(pixels) = latest.slot.lock().unwrap().take() {
             crate::show_stream_picture(&ui, &who, Image::from_rgba8(pixels));
         }
@@ -1554,7 +1589,7 @@ pub async fn video_check(server: &str) -> String {
             Err(_) => share::Source::primary()?,
         };
         let height = std::env::var("NIMBUS_CHECK_HEIGHT").ok().and_then(|h| h.parse().ok()).unwrap_or(0);
-        let prepared = share::prepare(source, share::Quality { height, ..Default::default() })?;
+        let prepared = share::prepare(source, share::Quality { height, ..Default::default() }, false)?;
         let (width, height, encoder) = (prepared.width, prepared.height, prepared.encoder_name.clone());
         let track = LocalVideoTrack::create_video_track("screen", RtcVideoSource::Native(prepared.source.clone()));
         room.local_participant().publish_track(LocalTrack::Video(track.clone()), share_options(&prepared)).await.map_err(|e| format!("publish: {e}"))?;
@@ -1666,6 +1701,41 @@ async fn fetch_token(http: &reqwest::Client, server: &str, room: &str, identity:
     let token = body["token"].as_str().ok_or_else(|| crate::i18n::t("сервер голоса не прислал токен"))?;
     crate::trust::check_ws(url, &addr)?;
     Ok((url.to_string(), token.to_string()))
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::*;
+
+    fn picture(w: u32, h: u32, values: &[u8]) -> Pixels {
+        let mut p = Pixels::new(w, h);
+        p.make_mut_bytes().copy_from_slice(values);
+        p
+    }
+
+    #[test]
+    fn a_picture_is_halved_only_when_far_larger_than_its_place() {
+        let big = Pixels::new(1920, 1080);
+        assert_eq!(fit_to_shown(big.clone(), 0).width(), 1920, "unknown place: left alone");
+        assert_eq!(fit_to_shown(big.clone(), 1000).width(), 1920, "under twice as wide: left alone");
+        assert_eq!(fit_to_shown(big.clone(), 960).width(), 960);
+        let small = fit_to_shown(big, 400);
+        assert_eq!((small.width(), small.height()), (480, 270));
+    }
+
+    #[test]
+    fn halving_averages_the_four_pixels() {
+        let p = picture(2, 2, &[0, 0, 0, 255, 100, 0, 0, 255, 0, 40, 0, 255, 100, 40, 200, 255]);
+        let small = halved(&p);
+        assert_eq!((small.width(), small.height()), (1, 1));
+        assert_eq!(small.as_bytes(), &[50, 20, 50, 255]);
+    }
+
+    #[test]
+    fn an_odd_size_stays_inside_the_picture() {
+        let small = halved(&Pixels::new(5, 3));
+        assert_eq!((small.width(), small.height()), (2, 1));
+    }
 }
 
 #[cfg(test)]

@@ -1,3 +1,30 @@
+## Nimbus 0.2.1
+
+### Servers
+- Server folders: drag a server onto another one to make a folder, and drag to reorder. The order stays on this computer.
+- The server menu can invite people, with a window listing your friends, and leave the server after a question.
+- Servers you join or leave in another client appear on or leave the rail right away.
+- Create Thread, Edit and Delete in the message menu work again.
+
+### Messages
+- New messages can come in with an animation of your choice, including one that types them out. See Settings, Appearance.
+- Unread direct messages show under the DM button, as in Discord.
+- Member lists load faster and no longer stay empty in some channels.
+- GIFs are kept on disk, so they don't load again every time.
+
+### Voice and streams
+- Hover over the connection icon to see your ping, and click it for a connection window with a chart.
+- Streams you watch should look sharper: Nimbus now tells Discord the size it wants, and big pictures are scaled down smoothly in small tiles.
+- Your own stream shows up by itself when you start it.
+- Better picture quality for streams sent from Nimbus, and the bitrate follows what Discord's server allows.
+- A short drop of the connection to Discord no longer throws you out of voice and the stream. Nimbus picks up the same session again.
+- No more false "Voice isn't working" message when only the stream has trouble.
+- Smoother sound from music bots.
+
+### Other
+- The window can be moved by its top bar again.
+- Part of this update was contributed by a member of the community. Thank you!
+
 ## Nimbus 0.2.0
 
 ### Languages

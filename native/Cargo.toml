@@ -1,6 +1,6 @@
 [package]
 name = "nimbus-native"
-version = "0.2.0"
+version = "0.2.1"
 default-run = "nimbus-native"
 description = "Native (no WebView) prototype of the Nimbus client"
 license = "GPL-3.0-or-later"

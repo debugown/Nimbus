@@ -529,8 +529,12 @@ impl State {
 
     /// RTCP from the server about what we send.
     fn on_rtcp(&mut self, packet: &[u8]) {
-        let (Some(net), Some(s)) = (self.net.as_mut(), self.sending.as_mut()) else { return };
+        let Some(net) = self.net.as_mut() else { return };
         let Some(plain) = golive_send::open_rtcp(&net.cipher, packet) else { return };
+        if let Some(lost) = crate::voiceping::loss_in_report(&plain, net.ssrc) {
+            crate::voiceping::note_loss(lost);
+        }
+        let Some(s) = self.sending.as_mut() else { return };
         for feedback in golive_send::parse_rtcp(&plain) {
             match feedback {
                 Feedback::Keyframe => s.keyframe(),
@@ -620,6 +624,11 @@ impl State {
     /// Every quarter second: whether the cameras can be seen changed, keyframes still
     /// missing, frames waiting for packets that never came.
     fn on_tick(&mut self) {
+        if let Some(net) = &self.net {
+            let encrypted = net.dave.version() > 0;
+            let code = net.dave.with_session(|s| s.voice_privacy_code().map(String::from)).flatten();
+            crate::voiceping::set_privacy(encrypted, code.as_deref());
+        }
         let shown = crate::CALL_SHOWN.load(Ordering::Relaxed) && crate::WINDOW_SHOWN.load(Ordering::Relaxed);
         if shown != self.shown {
             self.shown = shown;

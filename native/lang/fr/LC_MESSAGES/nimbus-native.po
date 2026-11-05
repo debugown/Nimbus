@@ -1859,3 +1859,33 @@ msgstr "Nimbus a été mis à jour"
 
 msgid "Что нового"
 msgstr "Nouveautés"
+
+msgid "Подключение"
+msgstr "Connexion"
+
+msgid "Конфиденциальность"
+msgstr "Confidentialité"
+
+msgid "Средняя задержка"
+msgstr "Latence moyenne"
+
+msgid "Последняя задержка"
+msgstr "Dernière latence"
+
+msgid "Потеря исходящих пакетов"
+msgstr "Perte de paquets sortants"
+
+msgid "При задержке 250 мс и больше звук может отставать. При потере больше 10% пакетов голос может искажаться. Если проблема не исчезает, отключитесь и подключитесь снова."
+msgstr "À partir de 250 ms, le son peut être en retard. Au-delà de 10 % de perte de paquets, ta voix peut être déformée. Si le problème persiste, déconnecte-toi et reconnecte-toi."
+
+msgid "Код приватности голоса"
+msgstr "Code de confidentialité vocale"
+
+msgid "Сравните этот код с собеседниками: одинаковый код значит, что между вами никого нет."
+msgstr "Compare ce code avec les autres : s'il est identique, personne n'est entre vous."
+
+msgid "Защищено сквозным шифрованием"
+msgstr "Protégé par chiffrement de bout en bout"
+
+msgid "Без сквозного шифрования"
+msgstr "Sans chiffrement de bout en bout"

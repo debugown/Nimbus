@@ -52,6 +52,7 @@ pub(crate) struct AuxNetwork {
 
     speaking: SpeakingState,
     last_heartbeat_nonce: Option<u64>,
+    last_heartbeat_at: Option<std::time::Instant>,
 
     attempt_idx: usize,
     info: ConnectionInfo,
@@ -95,6 +96,7 @@ impl AuxNetwork {
 
             speaking: SpeakingState::empty(),
             last_heartbeat_nonce: None,
+            last_heartbeat_at: None,
 
             attempt_idx,
             info,
@@ -256,6 +258,7 @@ impl AuxNetwork {
             Uniform::new(0, JS_MAX_INT).expect("uniform range is finite and nonempty");
         let nonce = rand::rng().sample(nonce_range);
         self.last_heartbeat_nonce = Some(nonce);
+        self.last_heartbeat_at = Some(std::time::Instant::now());
 
         trace!("Sent heartbeat {:?}", self.speaking);
 
@@ -307,6 +310,10 @@ impl AuxNetwork {
                 if let Some(nonce) = self.last_heartbeat_nonce.take() {
                     if ev.nonce == nonce {
                         trace!("Heartbeat ACK received.");
+                        if let Some(at) = self.last_heartbeat_at.take() {
+                            let ms = at.elapsed().as_millis().min(60_000) as u32;
+                            crate::driver::video::LAST_PING_MS.store(ms.max(1), std::sync::atomic::Ordering::Relaxed);
+                        }
                     } else {
                         warn!(
                             "Heartbeat nonce mismatch! Expected {}, saw {}.",
