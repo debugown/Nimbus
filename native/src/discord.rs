@@ -396,6 +396,11 @@ impl Api {
         self.post(&path, body).await
     }
 
+    /// Leaves a server. Discord refuses its owner.
+    pub async fn leave_guild(&self, guild: &str) -> Result<Value> {
+        self.request(reqwest::Method::DELETE, &format!("/users/@me/guilds/{guild}"), Some(json!({ "lease": false }))).await
+    }
+
     /// A thread started from a message; Discord answers with the thread.
     pub async fn create_thread(&self, channel: &str, message: &str, name: &str) -> Result<Value> {
         let (path, body) = crate::forum::thread_request(channel, message, name)?;
@@ -565,7 +570,7 @@ async fn session(token: &str, events: &UnboundedSender<Event>, outgoing: &mut Un
                                 t @ ("READY_SUPPLEMENTAL" | "PRESENCE_UPDATE" | "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "CHANNEL_DELETE"
                                 | "GUILD_MEMBER_UPDATE" | "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" | "GUILD_ROLE_DELETE"
                                 | "SESSIONS_REPLACE" | "RELATIONSHIP_ADD" | "RELATIONSHIP_UPDATE" | "RELATIONSHIP_REMOVE" | "MESSAGE_ACK" | "CALL_CREATE" | "CALL_UPDATE" | "CALL_DELETE"
-                                | "USER_GUILD_SETTINGS_UPDATE" | "CHANNEL_RECIPIENT_ADD" | "CHANNEL_RECIPIENT_REMOVE"),
+                                | "USER_GUILD_SETTINGS_UPDATE" | "CHANNEL_RECIPIENT_ADD" | "CHANNEL_RECIPIENT_REMOVE" | "GUILD_CREATE" | "GUILD_DELETE"),
                             ) => Some(Event::Home(t.to_string(), data)),
                             Some(
                                 t @ ("TYPING_START" | "MESSAGE_UPDATE" | "MESSAGE_DELETE" | "MESSAGE_DELETE_BULK" | "MESSAGE_REACTION_ADD"

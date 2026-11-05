@@ -92,7 +92,7 @@ pub struct Look {
     pub compact: bool,
     pub show_time: bool,
     pub reduce_motion: bool,
-    /// How a new message comes in: 0 from the side, 1 glitch, 2 fade and zoom.
+    /// How a new message comes in: 0 from the side, 1 side then typing, 2 fade and zoom.
     pub message_anim: i32,
     pub contrast: bool,
     pub time12: bool,

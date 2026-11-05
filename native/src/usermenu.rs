@@ -137,9 +137,9 @@ pub fn role_rows(me: &perms::Me, theirs: &[String]) -> Vec<RoleRow> {
         .collect()
 }
 
-/// The first text or announcement channel of a server that we can see: where an invite is made.
+/// The first text or announcement channel of a server that we may invite to: where an invite is made.
 pub fn invite_channel(channels: &[Value], me: &perms::Me) -> Option<String> {
-    let mut usable: Vec<&Value> = channels.iter().filter(|c| matches!(c["type"].as_u64(), Some(0 | 5)) && me.can_view(c)).collect();
+    let mut usable: Vec<&Value> = channels.iter().filter(|c| matches!(c["type"].as_u64(), Some(0 | 5)) && me.can_invite(c)).collect();
     usable.sort_by_key(|c| c["position"].as_i64().unwrap_or(0));
     usable.first().and_then(|c| c["id"].as_str()).map(String::from)
 }
@@ -251,8 +251,8 @@ mod tests {
     }
 
     #[test]
-    fn an_invite_goes_to_the_first_channel_we_can_see() {
-        let me = perms::Me::new("g", "u", false, &[json!({ "id": "g", "permissions": "1024" })], vec![]);
+    fn an_invite_goes_to_the_first_channel_we_may_invite_to() {
+        let me = perms::Me::new("g", "u", false, &[json!({ "id": "g", "permissions": "1025" })], vec![]);
         let hidden = json!([{ "id": "g", "type": 0, "allow": "0", "deny": "1024" }]);
         let channels = [
             json!({ "id": "voice", "type": 2, "position": 0 }),

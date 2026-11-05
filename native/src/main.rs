@@ -13,6 +13,7 @@ mod camera;
 mod chat;
 mod clipboard;
 mod fold;
+mod folders;
 mod clock;
 mod components;
 mod discord;
@@ -114,6 +115,10 @@ struct LastJoin {
 
 /// What the UI asks the network side to do.
 enum Cmd {
+    /// A new invite to a server, for the window with its friends.
+    InviteToGuild(String),
+    /// A server's invite link sent to a friend: them, the link.
+    InviteFriend(String, String),
     SelectGuild(String),
     SelectChannel(String),
     Send(String),
@@ -1176,6 +1181,183 @@ fn read_look(ui: &AppWindow) -> prefs::Look {
     }
 }
 
+thread_local! {
+    /// The friends of the open invite window, before its search.
+    static INVITE_PEOPLE: RefCell<Vec<PersonItem>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The invite window's friends that fit its search. Rows that are the same stay untouched, so the
+/// list keeps its place while avatars load.
+fn show_invite_people(ui: &AppWindow) {
+    let wanted = ui.get_invite_query().to_lowercase();
+    let fits = |p: &&PersonItem| wanted.is_empty() || p.name.to_lowercase().contains(&wanted) || p.subtitle.to_lowercase().contains(&wanted);
+    let rows: Vec<PersonItem> = INVITE_PEOPLE.with_borrow(|all| all.iter().filter(fits).cloned().collect());
+    let model = ui.get_invite_people();
+    let Some(list) = model.as_any().downcast_ref::<VecModel<PersonItem>>() else {
+        ui.set_invite_people(ModelRc::new(VecModel::from(rows)));
+        return;
+    };
+    if list.row_count() != rows.len() {
+        list.set_vec(rows);
+        return;
+    }
+    for (i, row) in rows.into_iter().enumerate() {
+        if list.row_data(i).as_ref() != Some(&row) {
+            list.set_row_data(i, row);
+        }
+    }
+}
+
+fn change_invite_person(ui: &AppWindow, id: &str, change: impl FnOnce(&mut PersonItem)) {
+    INVITE_PEOPLE.with_borrow_mut(|all| {
+        if let Some(person) = all.iter_mut().find(|p| p.id == id) {
+            change(person);
+        }
+    });
+    show_invite_people(ui);
+}
+
+/// A gateway GUILD_CREATE as its id, name and icon hash; none while the server is unavailable.
+fn new_guild(data: &Value) -> Option<(String, String, Option<String>)> {
+    if data["unavailable"].as_bool() == Some(true) {
+        return None;
+    }
+    // As in READY, newer payloads nest these under `properties`.
+    let p = if data["properties"].is_object() { &data["properties"] } else { data };
+    let id = data["id"].as_str()?.to_string();
+    Some((id, readable(p["name"].as_str()?), p["icon"].as_str().map(String::from)))
+}
+
+/// The server rail's clicks and drags.
+fn setup_rail(ui: &AppWindow) {
+    let weak = ui.as_weak();
+    ui.on_invite_search(move || {
+        if let Some(ui) = weak.upgrade() {
+            show_invite_people(&ui);
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_rail_refresh(move || {
+        if let Some(ui) = weak.upgrade() {
+            sync_rail(&ui);
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_rail_toggle(move |key| {
+        folders::toggle(&key);
+        if let Some(ui) = weak.upgrade() {
+            sync_rail(&ui);
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_rail_drop(move |from, row, zone| {
+        let Some(ui) = weak.upgrade() else { return };
+        let present: Vec<String> = ui.get_guilds().iter().filter(|g| g.id != HOME).map(|g| g.id.to_string()).collect();
+        // The rail's first line is the messages, which aren't part of the saved order.
+        folders::dropped(&present, &from, (row - 1).max(0) as usize, folders::Zone::from_int(zone));
+        sync_rail(&ui);
+    });
+}
+
+/// Draws the server rail from the servers and the saved order and folders. Rows that are the same
+/// stay untouched, so loading an icon doesn't redraw the whole rail.
+fn sync_rail(ui: &AppWindow) {
+    let guilds: Vec<GuildItem> = ui.get_guilds().iter().collect();
+    let present: Vec<String> = guilds.iter().filter(|g| g.id != HOME).map(|g| g.id.to_string()).collect();
+    let selected = ui.get_selected_guild();
+    let find = |id: &str| guilds.iter().find(|g| g.id == id).cloned().unwrap_or_default();
+    let empty = || ModelRc::new(VecModel::from(Vec::<GuildItem>::new()));
+    let plain = |item: GuildItem, inside: bool, last: bool| RailItem { item, inside, last, folder: false, open: false, selected: false, thumbs: empty() };
+    let mut rows: Vec<RailItem> = guilds.iter().filter(|g| g.id == HOME).map(|g| plain(g.clone(), false, false)).collect();
+    for row in folders::rows(&present) {
+        match row {
+            folders::Row::Server { id, folder, last } => rows.push(plain(find(&id), folder.is_some(), last)),
+            folders::Row::Folder { id, open, servers } => {
+                let inside: Vec<GuildItem> = servers.iter().map(|s| find(s)).collect();
+                let item = GuildItem {
+                    id: folders::folder_key(id).into(),
+                    unread: inside.iter().any(|g| g.unread),
+                    mentions: inside.iter().map(|g| g.mentions).sum(),
+                    voice: inside.iter().map(|g| g.voice).max().unwrap_or(0),
+                    ..Default::default()
+                };
+                let selected = inside.iter().any(|g| g.id == selected);
+                let thumbs = ModelRc::new(VecModel::from(inside.into_iter().take(4).collect::<Vec<_>>()));
+                rows.push(RailItem { item, folder: true, open, selected, inside: false, last: false, thumbs });
+            }
+        }
+    }
+    let model = ui.get_rail();
+    let Some(list) = model.as_any().downcast_ref::<VecModel<RailItem>>() else {
+        ui.set_rail(ModelRc::new(VecModel::from(rows)));
+        return;
+    };
+    if list.row_count() != rows.len() {
+        list.set_vec(rows);
+        return;
+    }
+    for (i, row) in rows.into_iter().enumerate() {
+        let same = list.row_data(i).is_some_and(|old| {
+            old.thumbs.iter().eq(row.thumbs.iter()) && RailItem { thumbs: row.thumbs.clone(), ..old } == row
+        });
+        if !same {
+            list.set_row_data(i, row);
+        }
+    }
+}
+
+/// The Typing animation: it starts when the slide from the side (260 ms in `MessageRow`) ends.
+const TYPING_AFTER: Duration = Duration::from_millis(260);
+const TYPING_TICK: Duration = Duration::from_millis(33);
+/// A long message types faster, so it never takes more than about 1.6 s.
+const TYPING_MAX_TICKS: usize = 48;
+
+/// Whether a block appears letter by letter; the others (a hidden spoiler among them) come whole.
+fn types_out(kind: i32) -> bool {
+    matches!(kind, TEXT | CODE | QUOTE)
+}
+
+/// How many steps a block takes to type.
+fn typed_len(b: &Block) -> usize {
+    if types_out(b.kind) { b.text.chars().count() } else { 1 }
+}
+
+/// The blocks of a message with `count` steps typed, a caret where the typing is. Plain until the
+/// end: half of a **bold** would show its marks.
+fn typed_blocks(full: &[Block], count: usize) -> Vec<Block> {
+    let mut left = count;
+    let mut out = Vec::new();
+    for b in full {
+        let len = typed_len(b);
+        if left >= len {
+            out.push(b.clone());
+            left -= len;
+            continue;
+        }
+        if types_out(b.kind) {
+            let text = b.text.chars().take(left).chain(['▌']).collect::<String>();
+            out.push(Block { styled: slint::StyledText::from_plain_text(&text), text: text.into(), ..b.clone() });
+        }
+        break;
+    }
+    out
+}
+
+/// The next steps of the typing. `shown` is the row's own list: an edit replaces it, and this then
+/// goes on unseen, without undoing the edit.
+fn type_out(weak: slint::Weak<AppWindow>, shown: std::rc::Rc<VecModel<Block>>, full: Vec<Block>, count: usize, step: usize) {
+    let Some(ui) = weak.upgrade() else { return };
+    let follow = ui.invoke_near_bottom();
+    let done = count >= full.iter().map(typed_len).sum::<usize>();
+    shown.set_vec(if done { full.clone() } else { typed_blocks(&full, count) });
+    if follow {
+        ui.invoke_follow_bottom();
+    }
+    if !done {
+        slint::Timer::single_shot(TYPING_TICK, move || type_out(weak, shown, full, count + step, step));
+    }
+}
+
 /// Puts a new message at the end of the chat: it comes in with the animation from the settings.
 /// `fresh` goes away soon after, or the row would play it again when scrolled back to.
 fn push_fresh(ui: &AppWindow, mut row: MessageItem) {
@@ -1183,7 +1365,20 @@ fn push_fresh(ui: &AppWindow, mut row: MessageItem) {
     let Some(list) = model.as_any().downcast_ref::<VecModel<MessageItem>>() else { return };
     let id = row.id.clone();
     row.fresh = true;
+    let a = ui.global::<Appearance>();
+    let typing = a.get_message_anim() == 1 && !a.get_reduce_motion() && !row.system;
+    let full: Vec<Block> = if typing { row.blocks.iter().collect() } else { Vec::new() };
+    let shown = full.iter().any(|b| types_out(b.kind)).then(|| std::rc::Rc::new(VecModel::from(typed_blocks(&full, 0))));
+    if let Some(shown) = &shown {
+        row.blocks = ModelRc::from(shown.clone());
+    }
     list.push(row);
+    if let Some(shown) = shown {
+        let total = full.iter().map(typed_len).sum::<usize>();
+        let step = total.div_ceil(TYPING_MAX_TICKS);
+        let weak = ui.as_weak();
+        slint::Timer::single_shot(TYPING_AFTER, move || type_out(weak, shown, full, step, step));
+    }
     let weak = ui.as_weak();
     slint::Timer::single_shot(Duration::from_secs(1), move || {
         let Some(ui) = weak.upgrade() else { return };
@@ -3634,6 +3829,13 @@ impl Worker {
             Event::Stream(kind, data) => {
                 let _ = self.voice.send(voice::VoiceCmd::DiscordStream(kind, data));
             }
+            Event::Home(kind, data) if kind == "GUILD_CREATE" => self.guild_appeared(data),
+            // Only a server we are out of: "unavailable" is an outage at Discord.
+            Event::Home(kind, data) if kind == "GUILD_DELETE" && data["unavailable"].as_bool() != Some(true) => {
+                if let Some(id) = data["id"].as_str() {
+                    let _ = self.guild_gone(id.to_string()).await;
+                }
+            }
             Event::Home(kind, data) => self.on_home_event(&kind, data),
             Event::Chat(kind, data) => self.on_chat_event(&kind, data),
             Event::Status(text) => on_ui(&self.ui, move |ui| {
@@ -3901,6 +4103,19 @@ impl Worker {
                 self.create_invite(&channel).await;
                 Ok(())
             }
+            Cmd::InviteToGuild(guild) => {
+                self.invite_window(&guild).await;
+                Ok(())
+            }
+            Cmd::InviteFriend(user, link) => {
+                let sent = self.send_link(&user, &link).await;
+                let kind = if sent.is_ok() { 2 } else { 0 };
+                on_ui(&self.ui, move |ui| change_invite_person(&ui, &user, |p| p.kind = kind));
+                if let Err(e) = sent {
+                    notice(&self.ui, discord::refusal(&e));
+                }
+                Ok(())
+            }
             Cmd::CreateThread(message, name) => {
                 self.create_thread(&message, &name).await;
                 Ok(())
@@ -3973,6 +4188,7 @@ impl Worker {
         on_ui(&self.ui, move |ui| {
             let items: Vec<GuildItem> = list.iter().map(Guild::item).collect();
             ui.set_guilds(ModelRc::new(VecModel::from(items)));
+            sync_rail(&ui);
             ui.set_status(i18n::t("В сети").into());
             ui.set_online(true);
         });
@@ -3985,6 +4201,7 @@ impl Worker {
                     g.icon = Image::from_rgba8(pixels);
                     g.has_icon = true;
                 });
+                sync_rail(&ui);
             });
         });
 
@@ -4354,6 +4571,7 @@ impl Worker {
                     });
                 }
             }
+            sync_rail(&ui);
             let list = ui.get_channels();
             for row in 0..list.row_count() {
                 let Some(c) = list.row_data(row) else { continue };
@@ -4520,6 +4738,7 @@ impl Worker {
                     update_row(model.clone(), row, |g| g.voice = voice);
                 }
             }
+            sync_rail(&ui);
         });
     }
 
@@ -6284,8 +6503,8 @@ impl Worker {
         self.person_open(user).await
     }
 
-    /// "Пригласить на сервер": a new invite to its first channel we can see, sent to them in the DM.
-    async fn invite_to(&mut self, guild: &str, user: &str) -> Result<(), String> {
+    /// A new invite to a server's first channel we can see: its link and the channel's name.
+    async fn guild_invite(&mut self, guild: &str) -> Result<(String, String), String> {
         let mine = self.guild_perms(guild).await.ok_or_else(|| i18n::t("не на сервере"))?;
         let kept = self.ready["guilds"].as_array().and_then(|l| l.iter().find(|g| g["id"].as_str() == Some(guild))).and_then(|g| g["channels"].as_array()).cloned();
         let channels = match kept {
@@ -6293,12 +6512,156 @@ impl Worker {
             _ => self.api.get(&format!("/guilds/{}/channels", snowflake(guild)?)).await?.as_array().cloned().unwrap_or_default(),
         };
         let channel = usermenu::invite_channel(&channels, &mine).ok_or_else(|| i18n::t("На этом сервере нет канала для приглашения"))?;
+        let name = channels.iter().find(|c| c["id"].as_str() == Some(channel.as_str())).and_then(|c| c["name"].as_str()).map(readable).unwrap_or_default();
         let made = self.api.create_invite(&channel).await?;
         let link = made["code"].as_str().filter(|c| invite::valid_code(c)).map(invite::link).ok_or_else(|| "Discord did not give a code".to_string())?;
+        Ok((link, name))
+    }
+
+    /// The link in a DM with them.
+    async fn send_link(&mut self, user: &str, link: &str) -> Result<(), String> {
         let dm = self.api.post("/users/@me/channels", json!({ "recipient_id": snowflake(user)?.to_string() })).await?;
         let to = dm["id"].as_str().ok_or_else(|| "Discord did not give a DM".to_string())?;
         self.api.post(&format!("/channels/{}/messages", snowflake(to)?), json!({ "content": link })).await?;
+        Ok(())
+    }
+
+    /// "Пригласить на сервер" on a person: a new invite, sent to them in the DM.
+    async fn invite_to(&mut self, guild: &str, user: &str) -> Result<(), String> {
+        let (link, _) = self.guild_invite(guild).await?;
+        self.send_link(user, &link).await?;
         notice(&self.ui, i18n::t("Приглашение отправлено"));
+        Ok(())
+    }
+
+    /// The server menu's "Пригласить на сервер": one request, then the window with the link and all
+    /// the friends (or Discord's refusal). Nobody gets anything until they are clicked.
+    async fn invite_window(&mut self, guild: &str) {
+        let (link, channel) = match self.guild_invite(guild).await {
+            Ok(made) => made,
+            Err(e) => {
+                on_ui(&self.ui, move |ui| {
+                    ui.set_made_invite_error(discord::refusal(&e).into());
+                    ui.set_made_invite_state(3);
+                });
+                return;
+            }
+        };
+        let look = home::Look { name: &display_name, avatar: &avatar_url, cdn: CDN };
+        let relationships = self.ready["relationships"].as_array().cloned().unwrap_or_default();
+        let rows = home::friend_rows(&relationships, &self.users, &self.presences, 1, &look);
+        let username = |id: &str| {
+            let told = relationships.iter().find(|r| r["id"].as_str() == Some(id)).and_then(|r| r["user"]["username"].as_str());
+            told.or(self.users.get(id).and_then(|u| u["username"].as_str())).unwrap_or_default().to_string()
+        };
+        let names: Vec<String> = rows.iter().map(|p| username(&p.id)).collect();
+        let jobs: Vec<ImageJob> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.avatar_url.is_empty())
+            .map(|(row, p)| ImageJob { row, url: p.avatar_url.clone(), w: DM_AVATAR_PX, h: DM_AVATAR_PX, ..Default::default() })
+            .collect();
+        let ids: Vec<String> = rows.iter().map(|p| p.id.clone()).collect();
+        on_ui(&self.ui, move |ui| {
+            let items = rows.iter().zip(names).map(|(p, username)| PersonItem {
+                id: p.id.clone().into(),
+                name: readable(&p.name).into(),
+                initial: p.name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default().into(),
+                subtitle: username.into(),
+                ..Default::default()
+            });
+            INVITE_PEOPLE.set(items.collect());
+            show_invite_people(&ui);
+            ui.set_made_invite_link(link.into());
+            ui.set_made_invite_channel(channel.into());
+            ui.set_made_invite_state(2);
+        });
+        let ui = self.ui.clone();
+        load_images(self.images.clone(), jobs, move |job, loaded| {
+            let Some(pixels) = loaded.map(|l| l.first()) else { return };
+            let Some(id) = ids.get(job.row).cloned() else { return };
+            on_ui(&ui, move |ui| {
+                change_invite_person(&ui, &id, |p| {
+                    p.avatar = Image::from_rgba8(pixels);
+                    p.has_avatar = true;
+                });
+            });
+        });
+    }
+
+    /// "Покинуть сервер", after its question: it leaves the rail once Discord has said yes.
+    async fn leave_server(&mut self, guild: String) -> Result<(), String> {
+        self.api.leave_guild(&snowflake(&guild)?.to_string()).await?;
+        self.guild_gone(guild).await
+    }
+
+    /// A server we joined somewhere else (the official client, when Discord wanted its check there)
+    /// goes on the rail at once; one joined here is already there, and gets its details.
+    fn guild_appeared(&mut self, data: Value) {
+        let Some((id, name, icon)) = new_guild(&data) else { return };
+        names::note_roles(data["roles"].as_array().map(Vec::as_slice).unwrap_or_default());
+        names::note_channels(data["channels"].as_array().map(Vec::as_slice).unwrap_or_default());
+        if let Some(list) = self.ready["guilds"].as_array_mut() {
+            if !list.iter().any(|g| g["id"].as_str() == Some(id.as_str())) {
+                list.push(data);
+            }
+        }
+        if self.guild_names.contains_key(&id) {
+            return;
+        }
+        self.guild_names.insert(id.clone(), name.clone());
+        let item = Guild { id: id.clone(), name, ..Default::default() };
+        on_ui(&self.ui, move |ui| {
+            let model = ui.get_guilds();
+            if let Some(list) = model.as_any().downcast_ref::<VecModel<GuildItem>>() {
+                list.push(item.item());
+            }
+            sync_rail(&ui);
+        });
+        let Some(hash) = icon else { return };
+        let job = ImageJob { url: format!("{CDN}/icons/{id}/{hash}.png?size=128"), w: GUILD_ICON_PX, h: GUILD_ICON_PX, ..Default::default() };
+        let ui = self.ui.clone();
+        load_images(self.images.clone(), vec![job], move |_, loaded| {
+            let Some(pixels) = loaded.map(|l| l.first()) else { return };
+            let id = id.clone();
+            on_ui(&ui, move |ui| {
+                let model = ui.get_guilds();
+                if let Some(row) = model.iter().position(|g| g.id == id) {
+                    update_row(model, row, |g| {
+                        g.icon = Image::from_rgba8(pixels);
+                        g.has_icon = true;
+                    });
+                }
+                sync_rail(&ui);
+            });
+        });
+    }
+
+    /// A server we are out of, by our own click or from elsewhere, leaves the rail.
+    async fn guild_gone(&mut self, guild: String) -> Result<(), String> {
+        if let Some(list) = self.ready["guilds"].as_array_mut() {
+            list.retain(|g| g["id"].as_str() != Some(guild.as_str()));
+        }
+        self.guild_names.remove(&guild);
+        let open = self.guild.as_deref() == Some(guild.as_str());
+        on_ui(&self.ui, move |ui| {
+            let model = ui.get_guilds();
+            if let Some(list) = model.as_any().downcast_ref::<VecModel<GuildItem>>() {
+                if let Some(row) = list.iter().position(|g| g.id == guild) {
+                    list.remove(row);
+                }
+            }
+            folders::forget(&guild);
+            if open {
+                ui.set_selected_guild(HOME.into());
+                ui.set_show_call(false);
+                ui.set_forum_open(false);
+            }
+            sync_rail(&ui);
+        });
+        if open {
+            self.select_guild(HOME.into()).await?;
+        }
         Ok(())
     }
 
@@ -6455,6 +6818,8 @@ impl Worker {
         let guild = || self.menu_guild.clone().ok_or_else(|| i18n::t("не на сервере"));
         match action {
             "dm" => return self.open_dm(user).await,
+            // `user` is the server's id here.
+            "leave-server" => return self.leave_server(user).await,
             "friend-add" => self.api.request_friend(&user).await,
             "friend-remove" => self.api.remove_friend(&snowflake(&user)?.to_string()).await,
             "mute" | "unmute" => self.api.edit_member(&guild()?, &user, json!({ "mute": action == "mute" })).await,
@@ -8277,7 +8642,7 @@ impl Worker {
         });
     }
 
-    /// A server just joined goes into the server list (the gateway doesn't tell this client).
+    /// A server just joined here goes into the server list right away.
     fn add_joined_guild(&mut self, p: &invite::Preview) {
         if self.guild_names.contains_key(&p.guild_id) {
             return;
@@ -8295,6 +8660,7 @@ impl Worker {
                 }
                 list.push(g);
             }
+            sync_rail(&ui);
         });
     }
 
@@ -9355,6 +9721,24 @@ fn fill_demo(ui: &AppWindow) {
         ui.set_made_invite_link(invite::link("Xk7pQ2mN").into());
         ui.set_made_invite_state(2);
     }
+    // `--demo-guild-invite`: a server's invite window with made-up friends, one already invited.
+    if std::env::args().any(|a| a == "--demo-guild-invite") {
+        let friend = |id: &str, name: &str, tag: &str, kind: i32| PersonItem {
+            id: id.into(),
+            name: name.into(),
+            initial: name.chars().next().map(|c| c.to_string()).unwrap_or_default().into(),
+            subtitle: tag.into(),
+            kind,
+            ..Default::default()
+        };
+        INVITE_PEOPLE.set(vec![friend("1", "Alice", "demo_alice", 0), friend("2", "Bob", "demo_bob", 2), friend("3", "Zed", "demo_zed", 0)]);
+        show_invite_people(ui);
+        ui.set_made_invite_place("Тестовый сервер".into());
+        ui.set_made_invite_channel("main-chat".into());
+        ui.set_made_invite_link(invite::link("Xk7pQ2mN").into());
+        ui.set_invite_rich(true);
+        ui.set_made_invite_state(2);
+    }
     // `--demo-thread`: the window for a thread from a message, a name typed in.
     if std::env::args().any(|a| a == "--demo-thread") {
         ui.set_thread_draft("План на вечер".into());
@@ -9390,6 +9774,7 @@ fn fill_demo(ui: &AppWindow) {
     }
     ui.set_typing_line(i18n::tf("{} печатает…", &[&"demo_alice"]).into());
     ui.set_guilds(ModelRc::new(VecModel::from(guilds.to_vec())));
+    sync_rail(ui);
     ui.set_channels(ModelRc::new(VecModel::from(channels)));
     // `--demo-many=N`: the same messages again and again, to see how a long list behaves.
     let many = std::env::args().find_map(|a| a.strip_prefix("--demo-many=").and_then(|n| n.parse::<usize>().ok()));
@@ -10538,6 +10923,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     setup_language(&ui);
     setup_changelog(&ui);
+    setup_rail(&ui);
     // Watches the push-to-talk key in the background: Windows gives key
     // presses only to the focused window, but the key must work anywhere.
     audio::watch_ptt();
@@ -11236,6 +11622,18 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_create_invite(move |channel| {
         let _ = make_invite_tx.send(Cmd::CreateInvite(channel.to_string()));
     });
+    let guild_invite_tx = tx.clone();
+    ui.on_invite_to_guild(move |guild| {
+        let _ = guild_invite_tx.send(Cmd::InviteToGuild(guild.to_string()));
+    });
+    let invite_friend_tx = tx.clone();
+    let weak = ui.as_weak();
+    ui.on_invite_friend(move |user, link| {
+        if let Some(ui) = weak.upgrade() {
+            change_invite_person(&ui, &user, |p| p.kind = 1);
+        }
+        let _ = invite_friend_tx.send(Cmd::InviteFriend(user.to_string(), link.to_string()));
+    });
     let thread_tx = tx.clone();
     ui.on_create_thread(move |message, name| {
         let _ = thread_tx.send(Cmd::CreateThread(message.to_string(), name.to_string()));
@@ -11378,6 +11776,29 @@ fn main() -> Result<(), slint::PlatformError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_server_is_read_from_the_gateway() {
+        let nested = json!({ "id": "1", "properties": { "name": "Basement", "icon": "abc" } });
+        assert_eq!(new_guild(&nested), Some(("1".to_string(), "Basement".to_string(), Some("abc".to_string()))));
+        let flat = json!({ "id": "2", "name": "Flat", "icon": null });
+        assert_eq!(new_guild(&flat), Some(("2".to_string(), "Flat".to_string(), None)));
+        assert_eq!(new_guild(&json!({ "id": "3", "unavailable": true })), None);
+    }
+
+    #[test]
+    fn typing_shows_part_of_the_text_then_all_of_it() {
+        let block = |kind: i32, text: &str| Block { kind, text: text.into(), ..Default::default() };
+        let full = vec![block(TEXT, "abc"), block(SPOILER, "hidden"), block(QUOTE, "de")];
+        assert_eq!(full.iter().map(typed_len).sum::<usize>(), 6);
+        assert_eq!(typed_blocks(&full, 0)[0].text, "▌");
+        assert_eq!(typed_blocks(&full, 2)[0].text, "ab▌");
+        assert_eq!(typed_blocks(&full, 3).len(), 1, "the spoiler isn't reached yet");
+        let more = typed_blocks(&full, 5);
+        assert_eq!(more[1].text, "hidden");
+        assert_eq!(more[2].text, "d▌");
+        assert_eq!(typed_blocks(&full, 6).len(), 3);
+    }
 
     #[test]
     fn the_start_window_sits_in_the_middle() {

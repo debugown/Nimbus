@@ -65,6 +65,36 @@ msgstr "Prywatność aktywności"
 msgid "Подключённые приложения"
 msgstr "Połączone aplikacje"
 
+msgid "Покинуть сервер"
+msgstr "Opuść serwer"
+
+msgid "Покинуть "
+msgstr "Opuścić "
+
+msgid "Покинуть"
+msgstr "Opuść"
+
+msgid "Ты сможешь вернуться только по новому приглашению."
+msgstr "Wrócisz tylko z nowym zaproszeniem."
+
+msgid "Участники окажутся в "
+msgstr "Członkowie trafią do "
+
+msgid "Найти друзей"
+msgstr "Szukaj znajomych"
+
+msgid "Отправлено"
+msgstr "Wysłano"
+
+msgid "Или отправьте другу ссылку-приглашение на сервер"
+msgstr "Lub wyślij znajomemu link z zaproszeniem"
+
+msgid "Ссылка перестанет действовать через 1 день."
+msgstr "Ten link wygaśnie za 1 dzień."
+
+msgid "Друзья не найдены"
+msgstr "Nie znaleziono znajomych"
+
 msgid "Кастомизация"
 msgstr "Dostosuj"
 
@@ -80,11 +110,11 @@ msgstr "Z boku"
 msgid "Выезжает с левого края."
 msgstr "Wsuwa się od lewej krawędzi."
 
-msgid "Глитч"
-msgstr "Glitch"
+msgid "Печатание"
+msgstr "Pisanie"
 
-msgid "Короткие помехи и дрожание."
-msgstr "Krótkie zakłócenia i drgania."
+msgid "Выезжает сбоку, затем текст печатается."
+msgstr "Wsuwa się z boku, a potem tekst sam się pisze."
 
 msgid "Плавное появление и приближение"
 msgstr "Płynne pojawianie i przybliżenie"

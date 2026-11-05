@@ -65,6 +65,36 @@ msgstr "Activity privacy"
 msgid "Подключённые приложения"
 msgstr "Connected apps"
 
+msgid "Покинуть сервер"
+msgstr "Leave Server"
+
+msgid "Покинуть "
+msgstr "Leave "
+
+msgid "Покинуть"
+msgstr "Leave"
+
+msgid "Ты сможешь вернуться только по новому приглашению."
+msgstr "You can only come back with a new invite."
+
+msgid "Участники окажутся в "
+msgstr "Members will land in "
+
+msgid "Найти друзей"
+msgstr "Search for friends"
+
+msgid "Отправлено"
+msgstr "Sent"
+
+msgid "Или отправьте другу ссылку-приглашение на сервер"
+msgstr "Or send a friend a server invite link"
+
+msgid "Ссылка перестанет действовать через 1 день."
+msgstr "This link expires in 1 day."
+
+msgid "Друзья не найдены"
+msgstr "No friends found"
+
 msgid "Кастомизация"
 msgstr "Customize"
 
@@ -80,11 +110,11 @@ msgstr "Side"
 msgid "Выезжает с левого края."
 msgstr "Slides in from the left edge."
 
-msgid "Глитч"
-msgstr "Glitch"
+msgid "Печатание"
+msgstr "Typing"
 
-msgid "Короткие помехи и дрожание."
-msgstr "Brief static and jitter."
+msgid "Выезжает сбоку, затем текст печатается."
+msgstr "Slides in from the side, then the text types itself out."
 
 msgid "Плавное появление и приближение"
 msgstr "Smooth Fade & Zoom"

@@ -65,6 +65,36 @@ msgstr "Aktivitäts-Datenschutz"
 msgid "Подключённые приложения"
 msgstr "Verbundene Apps"
 
+msgid "Покинуть сервер"
+msgstr "Server verlassen"
+
+msgid "Покинуть "
+msgstr "Verlassen: "
+
+msgid "Покинуть"
+msgstr "Verlassen"
+
+msgid "Ты сможешь вернуться только по новому приглашению."
+msgstr "Du kannst nur mit einer neuen Einladung zurückkehren."
+
+msgid "Участники окажутся в "
+msgstr "Mitglieder landen in "
+
+msgid "Найти друзей"
+msgstr "Freunde suchen"
+
+msgid "Отправлено"
+msgstr "Gesendet"
+
+msgid "Или отправьте другу ссылку-приглашение на сервер"
+msgstr "Oder sende einem Freund einen Einladungslink"
+
+msgid "Ссылка перестанет действовать через 1 день."
+msgstr "Dieser Link läuft in 1 Tag ab."
+
+msgid "Друзья не найдены"
+msgstr "Keine Freunde gefunden"
+
 msgid "Кастомизация"
 msgstr "Anpassen"
 
@@ -80,11 +110,11 @@ msgstr "Seitlich"
 msgid "Выезжает с левого края."
 msgstr "Gleitet vom linken Rand herein."
 
-msgid "Глитч"
-msgstr "Glitch"
+msgid "Печатание"
+msgstr "Tippen"
 
-msgid "Короткие помехи и дрожание."
-msgstr "Kurzes Rauschen und Zittern."
+msgid "Выезжает сбоку, затем текст печатается."
+msgstr "Gleitet von der Seite herein, dann tippt sich der Text."
 
 msgid "Плавное появление и приближение"
 msgstr "Sanftes Einblenden und Zoomen"

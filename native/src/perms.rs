@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+const CREATE_INVITE: u64 = 1 << 0;
 const KICK_MEMBERS: u64 = 1 << 1;
 const BAN_MEMBERS: u64 = 1 << 2;
 const ADMINISTRATOR: u64 = 1 << 3;
@@ -120,9 +121,17 @@ impl Me {
 
     /// Whether the channel shows up for us.
     pub fn can_view(&self, channel: &Value) -> bool {
-        if self.owner || self.base & ADMINISTRATOR != 0 {
-            return true;
-        }
+        self.owner || self.base & ADMINISTRATOR != 0 || self.in_channel(channel) & VIEW_CHANNEL != 0
+    }
+
+    /// Whether we may make an invite to the channel.
+    pub fn can_invite(&self, channel: &Value) -> bool {
+        const NEEDED: u64 = VIEW_CHANNEL | CREATE_INVITE;
+        self.owner || self.base & ADMINISTRATOR != 0 || self.in_channel(channel) & NEEDED == NEEDED
+    }
+
+    /// Our permissions in a channel: the server's, then its overwrites in Discord's order.
+    fn in_channel(&self, channel: &Value) -> u64 {
         let overwrites = channel["permission_overwrites"].as_array().map(Vec::as_slice).unwrap_or(&[]);
         let find = |id: &str| overwrites.iter().find(|o| o["id"].as_str() == Some(id));
         let apply = |p: u64, o: &Value| (p & !bits(&o["deny"])) | bits(&o["allow"]);
@@ -140,7 +149,7 @@ impl Me {
         if let Some(o) = find(&self.user) {
             p = apply(p, o);
         }
-        p & VIEW_CHANNEL != 0
+        p
     }
 }
 
@@ -156,6 +165,16 @@ mod tests {
             json!({"id": "mod", "permissions": "0"}),
         ];
         Me::new("g", "u", false, &all, roles.into_iter().map(String::from).collect())
+    }
+
+    #[test]
+    fn an_invite_needs_its_own_permission() {
+        let all = [json!({"id": "g", "permissions": "1025"})];
+        let me = Me::new("g", "u", false, &all, vec![]);
+        assert!(me.can_invite(&json!({})));
+        let closed = json!({"permission_overwrites": [{"id": "g", "type": 0, "allow": "0", "deny": "1"}]});
+        assert!(me.can_view(&closed));
+        assert!(!me.can_invite(&closed));
     }
 
     #[test]

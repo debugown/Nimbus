@@ -65,6 +65,36 @@ msgstr "Confidentialité de l'activité"
 msgid "Подключённые приложения"
 msgstr "Applications connectées"
 
+msgid "Покинуть сервер"
+msgstr "Quitter le serveur"
+
+msgid "Покинуть "
+msgstr "Quitter "
+
+msgid "Покинуть"
+msgstr "Quitter"
+
+msgid "Ты сможешь вернуться только по новому приглашению."
+msgstr "Vous ne pourrez revenir qu’avec une nouvelle invitation."
+
+msgid "Участники окажутся в "
+msgstr "Les membres arriveront dans "
+
+msgid "Найти друзей"
+msgstr "Rechercher des amis"
+
+msgid "Отправлено"
+msgstr "Envoyé"
+
+msgid "Или отправьте другу ссылку-приглашение на сервер"
+msgstr "Ou envoyez un lien d’invitation à un ami"
+
+msgid "Ссылка перестанет действовать через 1 день."
+msgstr "Ce lien expire dans 1 jour."
+
+msgid "Друзья не найдены"
+msgstr "Aucun ami trouvé"
+
 msgid "Кастомизация"
 msgstr "Personnaliser"
 
@@ -80,11 +110,11 @@ msgstr "Côté"
 msgid "Выезжает с левого края."
 msgstr "Glisse depuis le bord gauche."
 
-msgid "Глитч"
-msgstr "Glitch"
+msgid "Печатание"
+msgstr "Frappe"
 
-msgid "Короткие помехи и дрожание."
-msgstr "Brèves interférences et tremblements."
+msgid "Выезжает сбоку, затем текст печатается."
+msgstr "Glisse depuis le côté, puis le texte s’écrit tout seul."
 
 msgid "Плавное появление и приближение"
 msgstr "Fondu et zoom doux"

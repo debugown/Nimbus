@@ -17,6 +17,21 @@ export struct GuildItem {
     voice: int,
 }
 
+// A line of the server rail: a server, or a folder of servers.
+export struct RailItem {
+    // A folder's: its key as id, and what its servers have going on.
+    item: GuildItem,
+    folder: bool,
+    open: bool,
+    // The selected server is in this folder.
+    selected: bool,
+    // A server in an open folder, and the last of them.
+    inside: bool,
+    last: bool,
+    // The servers drawn small on a closed folder.
+    thumbs: [GuildItem],
+}
+
 export struct VoiceMember {
     identity: string,
     name: string,
@@ -612,7 +627,7 @@ export global Appearance {
     in-out property <bool> show-time: true;
     // No sliding and fading.
     in-out property <bool> reduce-motion: false;
-    // How a new message comes in: 0 from the side, 1 glitch, 2 fade and zoom.
+    // How a new message comes in: 0 from the side, 1 side then typing, 2 fade and zoom.
     in-out property <int> message-anim: 2;
     // Brighter text and edges.
     in-out property <bool> contrast: false;
@@ -732,6 +747,7 @@ global Icons {
     out property <string> inbox: "M4 13l3-8h10l3 8v6H4z M4 13h5l1 2h4l1-2h5";
     out property <string> clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M12 7v5l3 2";
     out property <string> soundboard: "M9 18V5l12-2v13 M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0z M21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z";
+    out property <string> folder: "M3 6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z";
     out property <string> search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z M20 20l-4-4";
     out property <string> mic: "M9 5a3 3 0 0 1 6 0v6a3 3 0 0 1-6 0z M5 10v1a7 7 0 0 0 14 0v-1 M12 18v4 M8 22h8";
     out property <string> mic-off: "M9 5a3 3 0 0 1 6 0v6a3 3 0 0 1-6 0z M5 10v1a7 7 0 0 0 14 0v-1 M12 18v4 M8 22h8 M3 3L21 21";
@@ -871,16 +887,64 @@ component Sheen inherits Rectangle {
 component GuildButton inherits Rectangle {
     in property <GuildItem> item;
     in property <bool> selected;
+    in property <bool> folder;
+    in property <bool> open;
+    in property <bool> inside;
+    in property <bool> last;
+    in property <[GuildItem]> thumbs;
+    // Can be dragged to another place on the rail.
+    in property <bool> draggable;
     callback clicked;
     // Right-click: the server's menu, where it was clicked.
     callback menu(length, length);
+    callback drag-begin();
+    callback drag-at(length, length);
+    // Let go: true to drop it here, false when the drag was cancelled.
+    callback drag-end(bool);
+    property <bool> dragged;
     height: 48px;
 
+    // An open folder: a band behind it and its servers.
+    if root.open || root.inside: Rectangle {
+        x: 12px;
+        y: root.open ? 2px : 0px;
+        width: 48px;
+        height: root.open ? 46px : root.last ? 50px : 48px;
+        background: Theme.surface3;
+        opacity: 0.5;
+        border-top-left-radius: root.open ? 14px : 0px;
+        border-top-right-radius: root.open ? 14px : 0px;
+        border-bottom-left-radius: root.last ? 14px : 0px;
+        border-bottom-right-radius: root.last ? 14px : 0px;
+    }
+
     ta := TouchArea {
-        clicked => { root.clicked(); }
+        clicked => {
+            if (!root.dragged) {
+                root.clicked();
+            }
+        }
+        moved => {
+            if (!self.pressed || !root.draggable) {
+                return;
+            }
+            if (!root.dragged && abs(self.mouse-x - self.pressed-x) + abs(self.mouse-y - self.pressed-y) > 6px) {
+                root.dragged = true;
+                root.drag-begin();
+            }
+            if (root.dragged) {
+                root.drag-at(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
         pointer-event(event) => {
             if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
                 root.menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.dragged = false;
+            }
+            if (root.dragged && event.kind != PointerEventKind.down && event.kind != PointerEventKind.move) {
+                root.drag-end(event.kind == PointerEventKind.up);
             }
         }
     }
@@ -906,7 +970,7 @@ component GuildButton inherits Rectangle {
         border-radius: 12px;
         drop-shadow-blur: root.selected ? 16px : ta.has-hover ? 10px : 0px;
         drop-shadow-color: Theme.glow;
-        background: (root.selected || ta.has-hover) && !root.item.has-icon ? Theme.accent : Theme.surface3;
+        background: (root.selected || ta.has-hover) && !root.item.has-icon && !root.folder ? Theme.accent : Theme.surface3;
         animate border-radius, background { duration: Appearance.slow; easing: ease-out; }
 
         if root.item.has-icon: Image {
@@ -914,6 +978,36 @@ component GuildButton inherits Rectangle {
             height: 40px;
             source: root.item.icon;
             image-fit: cover;
+        }
+        if root.folder && root.open: Icon {
+            commands: Icons.folder;
+            tint: Theme.text;
+            width: 22px;
+            height: 22px;
+        }
+        if root.folder && !root.open: Rectangle {
+            for t[i] in root.thumbs: Rectangle {
+                x: 3px + 18px * mod(i, 2);
+                y: 3px + 18px * floor(i / 2);
+                width: 16px;
+                height: 16px;
+                clip: true;
+                border-radius: 5px;
+                background: Theme.surface0;
+                if t.has-icon: Image {
+                    width: 16px;
+                    height: 16px;
+                    source: t.icon;
+                    image-fit: cover;
+                }
+                if !t.has-icon: Text {
+                    text: t.initials;
+                    color: Theme.text;
+                    font-size: 7px;
+                    font-weight: 600;
+                    overflow: clip;
+                }
+            }
         }
         if !root.item.has-icon && root.item.id == "@me": Icon {
             commands: Icons.chat;
@@ -2686,7 +2780,7 @@ component VoiceSettingsView inherits Rectangle {
             side: root.side;
             SettingTitle { text: @tr("" => "Анимация появления сообщений"); hint: @tr("" => "Как новое сообщение появляется в чате."); }
             Radio { text: @tr("" => "Сбоку"); hint: @tr("" => "Выезжает с левого края."); on: Appearance.message-anim == 0; clicked => { Appearance.message-anim = 0; root.appearance-changed(0); } }
-            Radio { text: @tr("" => "Глитч"); hint: @tr("" => "Короткие помехи и дрожание."); on: Appearance.message-anim == 1; clicked => { Appearance.message-anim = 1; root.appearance-changed(0); } }
+            Radio { text: @tr("" => "Печатание"); hint: @tr("" => "Выезжает сбоку, затем текст печатается."); on: Appearance.message-anim == 1; clicked => { Appearance.message-anim = 1; root.appearance-changed(0); } }
             Radio { text: @tr("" => "Плавное появление и приближение"); hint: @tr("" => "Мягко проявляется и приближается."); on: Appearance.message-anim == 2; clicked => { Appearance.message-anim = 2; root.appearance-changed(0); } }
             if Appearance.reduce-motion: Text {
                 text: @tr("" => "Анимация не показывается, пока включено пониженное движение.");
@@ -3775,14 +3869,15 @@ component ConfirmDialog inherits Rectangle {
             padding: 20px;
             spacing: 12px;
             Text {
-                text: root.action == "block" ? @tr("" => "Заблокировать ") + root.name + "?" : root.action == "friend-remove" ? @tr("" => "Удалить из друзей ") + root.name + "?" : root.action == "voice-server" ? @tr("" => "Подключиться к голосовому серверу?") : root.action == "delete-message" ? @tr("" => "Удалить сообщение?") : root.action == "ban" ? @tr("" => "Забанить ") + root.name + "?" : @tr("" => "Выгнать ") + root.name + "?";
+                text: root.action == "leave-server" ? @tr("" => "Покинуть ") + root.name + "?" : root.action == "block" ? @tr("" => "Заблокировать ") + root.name + "?" : root.action == "friend-remove" ? @tr("" => "Удалить из друзей ") + root.name + "?" : root.action == "voice-server" ? @tr("" => "Подключиться к голосовому серверу?") : root.action == "delete-message" ? @tr("" => "Удалить сообщение?") : root.action == "ban" ? @tr("" => "Забанить ") + root.name + "?" : @tr("" => "Выгнать ") + root.name + "?";
                 color: Theme.text;
                 font-size: 18px;
                 font-weight: 800;
             }
             Text {
                 vertical-stretch: 1;
-                text: root.action == "block" ? @tr("" => "Вы не увидите сообщений этого человека, а он не сможет вам писать.")
+                text: root.action == "leave-server" ? @tr("" => "Ты сможешь вернуться только по новому приглашению.")
+                    : root.action == "block" ? @tr("" => "Вы не увидите сообщений этого человека, а он не сможет вам писать.")
                     : root.action == "friend-remove" ? @tr("" => "Этот человек исчезнет из списка друзей.")
                     : root.action == "voice-server" ? @tr("" => "Сообщество использует голос на ") + root.name + @tr("" => ". Тот, кто держит этот сервер, увидит твой IP-адрес. Подключайся, только если доверяешь ему. Ответ запомнится.")
                     : root.action == "delete-message" ? @tr("" => "Сообщение исчезнет у всех. Вернуть его нельзя.")
@@ -3810,7 +3905,7 @@ component ConfirmDialog inherits Rectangle {
                     border-radius: 6px;
                     background: ok-area.has-hover ? #a12828 : #da373c;
                     ok-area := TouchArea { mouse-cursor: pointer; clicked => { root.confirmed(); } }
-                    ok-label := Text { text: root.action == "block" ? @tr("" => "Заблокировать") : root.action == "friend-remove" ? @tr("" => "Удалить") : root.action == "voice-server" ? @tr("" => "Подключиться") : root.action == "delete-message" ? @tr("" => "Удалить") : root.action == "ban" ? @tr("" => "Забанить") : @tr("" => "Выгнать"); color: #fff; font-size: 14px; font-weight: 600; }
+                    ok-label := Text { text: root.action == "leave-server" ? @tr("" => "Покинуть") : root.action == "block" ? @tr("" => "Заблокировать") : root.action == "friend-remove" ? @tr("" => "Удалить") : root.action == "voice-server" ? @tr("" => "Подключиться") : root.action == "delete-message" ? @tr("" => "Удалить") : root.action == "ban" ? @tr("" => "Забанить") : @tr("" => "Выгнать"); color: #fff; font-size: 14px; font-weight: 600; }
                 }
             }
         }
@@ -6304,18 +6399,15 @@ component MessageRow inherits Rectangle {    in property <MessageItem> item;
     property <bool> entering;
     property <duration> entered-at;
     property <int> enter-mode: Appearance.message-anim;
-    property <duration> enter-time: root.enter-mode == 0 ? 260ms : root.enter-mode == 1 ? 420ms : 300ms;
+    property <duration> enter-time: root.enter-mode == 2 ? 300ms : 260ms;
     property <float> enter-t: root.entering ? clamp((animation-tick() - root.entered-at) / root.enter-time, 0, 1) : 1;
     property <float> enter-ease: 1 - (1 - root.enter-t) * (1 - root.enter-t) * (1 - root.enter-t);
-    // The glitch moves in jumps, not smoothly.
-    property <int> glitch-step: floor(root.enter-t * 9);
-    property <float> glitch-shift: (mod(root.glitch-step * 7, 5) - 2) * (1 - root.enter-t);
     Timer {
         running: root.entering;
         interval: root.enter-time;
         triggered => { root.entering = false; }
     }
-    opacity: root.enter-mode != 1 ? root.enter-ease : root.enter-t >= 1 ? 1 : root.glitch-step == 1 || root.glitch-step == 4 ? 0.3 : 0.55 + 0.45 * root.enter-t;
+    opacity: root.enter-ease;
     transform-scale: root.enter-mode == 2 ? (0.92 + 0.08 * root.enter-ease) * 100% : 100%;
 
     // A mention of you: Discord's yellow bar along the left edge.
@@ -6330,7 +6422,7 @@ component MessageRow inherits Rectangle {    in property <MessageItem> item;
     }
 
     body := VerticalLayout {
-        x: root.enter-mode == 0 ? -72px * (1 - root.enter-ease) : root.enter-mode == 1 ? 6px * root.glitch-shift : 0px;
+        x: root.enter-mode != 2 ? -72px * (1 - root.enter-ease) : 0px;
         y: root.enter-mode == 2 ? 8px * (1 - root.enter-ease) : 0px;
         visible: !root.item.deleted;
         padding-left: 16px;
@@ -6612,20 +6704,6 @@ component MessageRow inherits Rectangle {    in property <MessageItem> item;
                 }
             }
         }
-    }
-
-    // The glitch's coloured stripes across the row.
-    if root.entering && root.enter-mode == 1: Rectangle {
-        x: 12px * root.glitch-shift;
-        y: (root.height - self.height) * mod(root.glitch-step * 3, 7) / 6;
-        height: max(3px, root.height / 5);
-        background: #00e5ff48;
-    }
-    if root.entering && root.enter-mode == 1: Rectangle {
-        x: -12px * root.glitch-shift;
-        y: (root.height - self.height) * mod(root.glitch-step * 5, 7) / 6;
-        height: max(3px, root.height / 6);
-        background: #ff2bd648;
     }
 }
 
@@ -7724,6 +7802,7 @@ export component AppWindow inherits Window {
 
     in property <string> window-title: "Nimbus";
     in property <[GuildItem]> guilds;
+    in property <[RailItem]> rail;
     in property <[ChannelItem]> channels;
     in property <[MessageItem]> messages;
     // in-out so a click highlights right away, before the network answers.
@@ -8277,6 +8356,11 @@ export component AppWindow inherits Window {
     }
 
     callback guild-clicked(string);
+    // The server rail: draw it anew, a folder clicked, what was dragged and where it was let go
+    // (the line, and 0 before it, 1 onto it, 2 after it).
+    callback rail-refresh();
+    callback rail-toggle(string);
+    callback rail-drop(string, int, int);
     callback add-friend(string);
     callback person-open(string);
     callback person-accept(string);
@@ -8377,6 +8461,19 @@ export component AppWindow inherits Window {
     in property <string> made-invite-link;
     in property <string> made-invite-error;
     callback create-invite(string);
+    // The same for a whole server: the bigger window, with friends to send the link to. `kind` of a
+    // friend: 0 not yet, 1 being sent, 2 sent.
+    in-out property <bool> invite-rich;
+    in property <string> made-invite-channel;
+    in property <[PersonItem]> invite-people;
+    in-out property <string> invite-query;
+    callback invite-to-guild(string);
+    callback invite-friend(string, string);
+    callback invite-search();
+    function close-invite() {
+        root.made-invite-state = 0;
+        root.invite-rich = false;
+    }
     // A new thread from a message (kind 1) or a new forum post (kind 2).
     in-out property <int> thread-dialog;
     in-out property <bool> thread-busy;
@@ -8468,6 +8565,7 @@ export component AppWindow inherits Window {
     // The same for the channels of a server just picked.
     property <bool> channels-hidden;
     changed selected-guild => {
+        root.rail-refresh();
         self.channels-hidden = true;
     }
     Timer {
@@ -8488,11 +8586,20 @@ export component AppWindow inherits Window {
             root.follow-step();
         }
     }
+    property <RailItem> rail-drag;
+    property <bool> rail-dragging;
+    property <length> rail-drag-y;
+    // The pointer's place on the rail, in lines; the first line (messages) stays first.
+    property <float> rail-drag-line: (root.rail-drag-y - rail-list.y - rail-list.content-y) / 48px;
+    property <int> rail-drop-row: clamp(floor(root.rail-drag-line), 1, max(1, root.rail.length - 1));
+    property <float> rail-drop-part: clamp(root.rail-drag-line - root.rail-drop-row, 0, 1);
+    property <int> rail-drop-zone: root.rail-drag.folder ? (root.rail-drop-part < 0.5 ? 0 : 2)
+        : root.rail-drop-part < 0.25 ? 0 : root.rail-drop-part > 0.75 ? 2 : 1;
     HorizontalLayout {
         y: 32px + root.banner-h;
         height: root.height - 32px - root.banner-h;
         // Server rail
-        Rectangle {
+        rail-box := Rectangle {
             width: 72px;
             background: Theme.pane0;
             opacity: root.client-hidden ? 0 : 1;
@@ -8509,25 +8616,76 @@ export component AppWindow inherits Window {
                 add-area := TouchArea { mouse-cursor: pointer; clicked => { root.open-join(""); } }
                 Icon { width: 22px; height: 22px; commands: Icons.plus; tint: add-area.has-hover ? #fff : #23a55a; }
             }
-            ListView {
+            rail-list := ListView {
                 height: parent.height - 56px - root.dock-height;
                 y: root.client-hidden ? 10px : 0px;
                 animate y { delay: 160ms; duration: root.client-in; easing: ease-out; }
-                for g in root.guilds: GuildButton {
-                    item: g;
-                    selected: g.id == root.selected-guild;
+                for r in root.rail: GuildButton {
+                    item: r.item;
+                    selected: r.selected || r.item.id == root.selected-guild;
+                    folder: r.folder;
+                    open: r.open;
+                    inside: r.inside;
+                    last: r.last;
+                    thumbs: r.thumbs;
+                    draggable: r.item.id != "@me";
+                    opacity: root.rail-dragging && root.rail-drag.item.id == r.item.id ? 0.35 : 1;
                     menu(x, y) => {
-                        if (g.id != "@me") {
-                            root.open-notify-menu(g.id, "", x, y);
+                        if (r.item.id != "@me" && !r.folder) {
+                            root.open-notify-menu(r.item.id, "", x, y);
                         }
                     }
                     clicked => {
-                        root.selected-guild = g.id;
+                        if (r.folder) {
+                            root.rail-toggle(r.item.id);
+                            return;
+                        }
+                        root.selected-guild = r.item.id;
                         root.people-page = 0;
                         root.forum-open = false;
-                        root.guild-clicked(g.id);
+                        root.guild-clicked(r.item.id);
+                    }
+                    drag-begin => {
+                        root.rail-drag = r;
+                        root.rail-dragging = true;
+                    }
+                    drag-at(x, y) => {
+                        root.rail-drag-y = y - rail-box.absolute-position.y;
+                    }
+                    drag-end(drop) => {
+                        root.rail-dragging = false;
+                        if (drop) {
+                            root.rail-drop(r.item.id, root.rail-drop-row, root.rail-drop-zone);
+                        }
                     }
                 }
+            }
+            // Where it will land: a ring around a line to go into, or a bar between two lines.
+            if root.rail-dragging && root.rail-drop-zone == 1: Rectangle {
+                x: 12px;
+                y: rail-list.y + rail-list.content-y + 48px * root.rail-drop-row;
+                width: 48px;
+                height: 48px;
+                border-radius: 14px;
+                border-width: 2px;
+                border-color: Theme.accent;
+            }
+            if root.rail-dragging && root.rail-drop-zone != 1: Rectangle {
+                x: 12px;
+                y: rail-list.y + rail-list.content-y + 48px * (root.rail-drop-row + (root.rail-drop-zone == 2 ? 1 : 0)) - 1px;
+                width: 48px;
+                height: 3px;
+                border-radius: 2px;
+                background: Theme.accent;
+            }
+            // What is being dragged, under the pointer.
+            if root.rail-dragging: GuildButton {
+                y: root.rail-drag-y - 24px;
+                width: 72px;
+                item: root.rail-drag.item;
+                folder: root.rail-drag.folder;
+                thumbs: root.rail-drag.thumbs;
+                opacity: 0.85;
             }
         }
 
@@ -8615,33 +8773,33 @@ export component AppWindow inherits Window {
                                 MenuItem {
                                     text: @tr("" => "Пригласить на сервер");
                                     clicked => {
-                                        server-menu.close();
                                         root.made-invite-place = root.sidebar-title;
                                         root.made-invite-state = 1;
                                         root.create-invite(root.selected-channel);
+                                        server-menu.close();
                                     }
                                 }
                                 MenuItem {
                                     text: @tr("" => "Мероприятия");
                                     clicked => {
-                                        server-menu.close();
                                         root.events-open = true;
                                         root.events-opened();
+                                        server-menu.close();
                                     }
                                 }
                                 MenuItem {
                                     text: @tr("" => "Параметры уведомлений");
                                     clicked => {
-                                        server-menu.close();
                                         root.open-notify-menu(root.selected-guild, "", 90px, 90px);
+                                        server-menu.close();
                                     }
                                 }
                                 MenuLine {}
                                 MenuItem {
                                     text: @tr("" => "Копировать ID сервера");
                                     clicked => {
-                                        server-menu.close();
                                         root.copy-text(root.selected-guild);
+                                        server-menu.close();
                                     }
                                 }
                             }
@@ -10517,8 +10675,8 @@ export component AppWindow inherits Window {
                 if !root.channel-is-dm && !root.channel-is-thread: MenuItem {
                     text: @tr("" => "Создать ветку");
                     clicked => {
-                        message-menu-popup.close();
                         root.open-thread-dialog(1, root.msg-menu-id);
+                        message-menu-popup.close();
                     }
                 }
                 MenuItem {
@@ -10537,18 +10695,18 @@ export component AppWindow inherits Window {
                 if root.msg-menu-author == root.me-id: MenuItem {
                     text: @tr("" => "Редактировать");
                     clicked => {
-                        message-menu-popup.close();
                         root.begin-edit(root.msg-menu-id);
+                        message-menu-popup.close();
                     }
                 }
                 if root.msg-menu-author == root.me-id: MenuItem {
                     text: @tr("" => "Удалить");
                     danger: true;
                     clicked => {
-                        message-menu-popup.close();
                         root.confirm-user = root.msg-menu-id;
                         root.confirm-name = @tr("" => "сообщение");
                         root.confirm-action = "delete-message";
+                        message-menu-popup.close();
                     }
                 }
             }
@@ -10608,13 +10766,26 @@ export component AppWindow inherits Window {
                 if root.notify-menu.channel != "": MenuItem {
                     text: @tr("" => "Пригласить");
                     clicked => {
-                        notify-menu-popup.close();
                         root.made-invite-place = root.notify-menu.name;
                         root.made-invite-state = 1;
                         root.create-invite(root.notify-menu.channel);
+                        notify-menu-popup.close();
                     }
                 }
-                if root.notify-menu.channel != "": MenuLine {}
+                // A new invite to the server, with its friends to send it to.
+                if root.notify-menu.channel == "": MenuItem {
+                    text: @tr("" => "Пригласить на сервер");
+                    clicked => {
+                        root.invite-query = "";
+                        root.invite-rich = true;
+                        root.made-invite-place = root.notify-menu.name;
+                        root.made-invite-state = 1;
+                        root.invite-to-guild(root.notify-menu.guild);
+                        // Last: nothing after closing the popup runs in an item of it.
+                        notify-menu-popup.close();
+                    }
+                }
+                MenuLine {}
                 HorizontalLayout {
                     padding-left: 8px;
                     height: 22px;
@@ -10667,6 +10838,17 @@ export component AppWindow inherits Window {
                     checked: root.notify-menu.muted;
                     clicked => {
                         root.notify-change(root.notify-menu.guild, root.notify-menu.channel, root.notify-menu.muted ? "unmute" : "mute");
+                        notify-menu-popup.close();
+                    }
+                }
+                if root.notify-menu.channel == "": MenuLine {}
+                if root.notify-menu.channel == "": MenuItem {
+                    text: @tr("" => "Покинуть сервер");
+                    danger: true;
+                    clicked => {
+                        root.confirm-user = root.notify-menu.guild;
+                        root.confirm-name = root.notify-menu.name;
+                        root.confirm-action = "leave-server";
                         notify-menu-popup.close();
                     }
                 }
@@ -11074,8 +11256,152 @@ export component AppWindow inherits Window {
         }
     }
 
+    // A new invite to a server: friends to send it to, and its link to copy.
+    if root.made-invite-state > 0 && root.invite-rich: Rectangle {
+        width: root.width;
+        height: root.height;
+        background: #000000a0;
+        TouchArea { clicked => { root.close-invite(); } }
+        Rectangle {
+            width: min(480px, root.width - 32px);
+            height: min(760px, root.height - 48px);
+            clip: true;
+            background: Theme.glass-strong;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Theme.edge;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: Theme.shadow;
+            TouchArea {}
+            VerticalLayout {
+                VerticalLayout {
+                    vertical-stretch: 0;
+                    padding: 20px;
+                    padding-bottom: 12px;
+                    spacing: 6px;
+                    HorizontalLayout {
+                        Text { text: @tr("" => "Пригласить друзей в ") + root.made-invite-place; color: Theme.text; font-size: 20px; font-weight: 800; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                        IconButton { icon: Icons.close; clicked => { root.close-invite(); } }
+                    }
+                    if root.made-invite-state == 2 && root.made-invite-channel != "": Text {
+                        text: @tr("" => "Участники окажутся в ") + "# " + root.made-invite-channel;
+                        color: Theme.muted;
+                        font-size: 14px;
+                        overflow: elide;
+                    }
+                    if root.made-invite-state == 2: Rectangle {
+                        height: 40px;
+                        border-radius: 8px;
+                        background: Theme.surface0;
+                        border-width: 1px;
+                        border-color: Theme.line;
+                        Icon { x: 12px; y: 11px; width: 18px; height: 18px; commands: Icons.search; tint: Theme.muted; }
+                        if root.invite-query == "": Text {
+                            x: 40px;
+                            height: parent.height;
+                            text: @tr("" => "Найти друзей");
+                            color: Theme.muted;
+                            font-size: 15px;
+                            vertical-alignment: center;
+                        }
+                        TextInput {
+                            x: 40px;
+                            width: parent.width - 52px;
+                            height: parent.height;
+                            text: root.invite-query;
+                            color: Theme.text;
+                            font-size: 15px;
+                            vertical-alignment: center;
+                            edited => {
+                                root.invite-query = self.text;
+                                root.invite-search();
+                            }
+                        }
+                    }
+                }
+                if root.made-invite-state == 1: Text { vertical-stretch: 1; text: @tr("" => "Создаю приглашение…"); color: Theme.muted; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                if root.made-invite-state == 3: Text { vertical-stretch: 1; text: root.made-invite-error; color: #f23f43; font-size: 14px; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; }
+                if root.made-invite-state == 2 && root.invite-people.length == 0: Text { vertical-stretch: 1; text: @tr("" => "Друзья не найдены"); color: Theme.muted; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                if root.made-invite-state == 2 && root.invite-people.length > 0: ListView {
+                    vertical-stretch: 1;
+                    for friend in root.invite-people: Rectangle {
+                        height: 48px;
+                        Rectangle {
+                            x: 20px;
+                            y: 6px;
+                            width: 36px;
+                            height: 36px;
+                            clip: true;
+                            border-radius: 18px;
+                            background: Theme.surface3;
+                            if friend.has-avatar: Image { width: 36px; height: 36px; source: friend.avatar; image-fit: cover; }
+                            if !friend.has-avatar: Text { text: friend.initial; color: Theme.text; font-size: 15px; font-weight: 600; }
+                        }
+                        Text { x: 68px; y: 6px; width: parent.width - 200px; text: friend.name; color: Theme.text; font-size: 15px; font-weight: 700; overflow: elide; }
+                        Text { x: 68px; y: 26px; width: parent.width - 200px; text: friend.subtitle; color: Theme.muted; font-size: 12px; overflow: elide; }
+                        Rectangle {
+                            x: parent.width - self.width - 20px;
+                            y: 8px;
+                            width: 108px;
+                            height: 32px;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: friend.kind == 2 ? #23a55a : Theme.line;
+                            background: friend.kind == 0 && send-area.has-hover ? Theme.button-hover : Theme.button;
+                            animate background { duration: Appearance.quick; }
+                            send-area := TouchArea {
+                                enabled: friend.kind == 0;
+                                mouse-cursor: friend.kind == 0 ? pointer : default;
+                                clicked => { root.invite-friend(friend.id, root.made-invite-link); }
+                            }
+                            Text {
+                                text: friend.kind == 2 ? @tr("" => "Отправлено") : friend.kind == 1 ? "…" : @tr("" => "Пригласить");
+                                color: friend.kind == 2 ? #23a55a : Theme.text;
+                                font-size: 13.5px;
+                                font-weight: 600;
+                            }
+                        }
+                    }
+                }
+                Rectangle { vertical-stretch: 0; height: 1px; background: Theme.line; }
+                if root.made-invite-state == 2: VerticalLayout {
+                    vertical-stretch: 0;
+                    padding: 20px;
+                    padding-top: 14px;
+                    spacing: 8px;
+                    Text { text: @tr("" => "Или отправьте другу ссылку-приглашение на сервер"); color: Theme.text; font-size: 15px; font-weight: 700; overflow: elide; }
+                    guild-link-box := Rectangle {
+                        height: 44px;
+                        border-radius: 8px;
+                        background: Theme.surface0;
+                        border-width: 1px;
+                        border-color: Theme.line;
+                        property <bool> copied;
+                        Text { x: 12px; width: parent.width - 130px; text: root.made-invite-link; color: Theme.text; font-size: 15px; vertical-alignment: center; overflow: elide; }
+                        Rectangle {
+                            x: parent.width - self.width - 5px;
+                            width: 100px;
+                            height: 34px;
+                            border-radius: 6px;
+                            background: guild-link-box.copied ? #23a55a : (guild-copy-area.has-hover ? Theme.accent-hover : Theme.accent);
+                            guild-copy-area := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.copy-text(root.made-invite-link);
+                                    guild-link-box.copied = true;
+                                }
+                            }
+                            Text { text: guild-link-box.copied ? @tr("" => "Скопировано") : @tr("" => "Копировать"); color: Theme.on-accent; font-size: 13.5px; font-weight: 600; }
+                        }
+                    }
+                    Text { text: @tr("" => "Ссылка перестанет действовать через 1 день."); color: Theme.muted; font-size: 12px; }
+                }
+            }
+        }
+    }
+
     // A new invite: being made, then its link to copy (or Discord's refusal).
-    if root.made-invite-state > 0: Rectangle {
+    if root.made-invite-state > 0 && !root.invite-rich: Rectangle {
         width: root.width;
         height: root.height;
         background: #000000a0;

@@ -65,6 +65,36 @@ msgstr "Etkinlik gizliliği"
 msgid "Подключённые приложения"
 msgstr "Bağlı uygulamalar"
 
+msgid "Покинуть сервер"
+msgstr "Sunucudan ayrıl"
+
+msgid "Покинуть "
+msgstr "Ayrıl: "
+
+msgid "Покинуть"
+msgstr "Ayrıl"
+
+msgid "Ты сможешь вернуться только по новому приглашению."
+msgstr "Yalnızca yeni bir davetle geri dönebilirsin."
+
+msgid "Участники окажутся в "
+msgstr "Üyeler şuraya gelecek: "
+
+msgid "Найти друзей"
+msgstr "Arkadaş ara"
+
+msgid "Отправлено"
+msgstr "Gönderildi"
+
+msgid "Или отправьте другу ссылку-приглашение на сервер"
+msgstr "Ya da bir arkadaşına davet bağlantısı gönder"
+
+msgid "Ссылка перестанет действовать через 1 день."
+msgstr "Bu bağlantı 1 gün sonra geçersiz olur."
+
+msgid "Друзья не найдены"
+msgstr "Arkadaş bulunamadı"
+
 msgid "Кастомизация"
 msgstr "Özelleştir"
 
@@ -80,11 +110,11 @@ msgstr "Yandan"
 msgid "Выезжает с левого края."
 msgstr "Sol kenardan kayarak gelir."
 
-msgid "Глитч"
-msgstr "Glitch"
+msgid "Печатание"
+msgstr "Yazma"
 
-msgid "Короткие помехи и дрожание."
-msgstr "Kısa parazit ve titreme."
+msgid "Выезжает сбоку, затем текст печатается."
+msgstr "Yandan kayarak gelir, ardından metin kendini yazar."
 
 msgid "Плавное появление и приближение"
 msgstr "Yumuşak solma ve yakınlaşma"
