@@ -1,6 +1,6 @@
 [package]
 name = "nimbus-native"
-version = "0.2.1"
+version = "0.2.2"
 default-run = "nimbus-native"
 description = "Native (no WebView) prototype of the Nimbus client"
 license = "GPL-3.0-or-later"
@@ -12,8 +12,9 @@ edition = "2021"
 slint = { version = "1.18.1", features = ["unstable-winit-030"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-socks = "0.5"
 futures-util = "0.3"
-reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
+reqwest = { version = "0.12", features = ["json", "multipart", "stream", "socks"] }
 # The system file dialog, for attaching files.
 rfd = "0.15"
 # The icon by the clock: the way back to a window that was closed to it.

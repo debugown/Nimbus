@@ -1,3 +1,14 @@
+## Nimbus 0.2.2
+
+### Connection
+- When Nimbus can't reach Discord, a line at the top of the window now says so and offers to fix it.
+- The connection check shows step by step where the way to Discord breaks: the internet, Discord's address, the server, the website and the live connection.
+- Repair tries a direct connection, then looks for a working proxy on this PC, and keeps the one that works.
+- You can type your own HTTP or SOCKS5 proxy. Voice and streams don't go through a proxy: they need a VPN.
+- Copy report gives a short text to send when asking for help. It has nothing about your account.
+- Nimbus can also send that report to the developers, but only after you say yes, and only the text you were shown. The server sees your IP address, as any website does.
+- If Discord doesn't answer when Nimbus starts, it keeps trying instead of stopping.
+
 ## Nimbus 0.2.1
 
 ### Servers

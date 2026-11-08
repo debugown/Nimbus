@@ -12,6 +12,7 @@ mod badge;
 mod camera;
 mod chat;
 mod clipboard;
+mod netcheck;
 mod fold;
 mod folders;
 mod clock;
@@ -3945,10 +3946,14 @@ impl Worker {
             }
             Event::Home(kind, data) => self.on_home_event(&kind, data),
             Event::Chat(kind, data) => self.on_chat_event(&kind, data),
-            Event::Resumed => on_ui(&self.ui, |ui| {
-                ui.set_status("".into());
-                ui.set_online(true);
-            }),
+            Event::Resumed => {
+                netcheck::set_down(&self.ui, false);
+                on_ui(&self.ui, |ui| {
+                    ui.set_status("".into());
+                    ui.set_online(true);
+                })
+            }
+            Event::Offline => netcheck::set_down(&self.ui, true),
             Event::Status(text) => on_ui(&self.ui, move |ui| {
                 ui.set_status(text.into());
                 ui.set_online(false);
@@ -4306,6 +4311,7 @@ impl Worker {
             sync_rail(&ui);
             ui.set_status(i18n::t("В сети").into());
             ui.set_online(true);
+            ui.set_net_down(false);
         });
         let ui = self.ui.clone();
         load_images(self.images.clone(), jobs, move |job, loaded| {
@@ -9292,7 +9298,13 @@ async fn wait_for_login(ui: &Weak<AppWindow>, cmds: &mut UnboundedReceiver<Cmd>,
                             break token;
                         }
                         Err(e) => {
-                            let text = i18n::tf("Discord не принял токен: {}", &[&e]);
+                            let text = if e.starts_with("Discord API") {
+                                i18n::tf("Discord не принял токен: {}", &[&e])
+                            } else {
+                                log_line(&format!("sign-in: {e}"));
+                                netcheck::set_down(ui, true);
+                                discord::friendly(&e)
+                            };
                             on_ui(ui, move |ui| ui.set_login_error(text.into()));
                         }
                     }
@@ -9465,15 +9477,28 @@ async fn run_once(ui: Weak<AppWindow>, cmds: &mut UnboundedReceiver<Cmd>, saved:
         },
     };
     let api = Api::new(token);
-    let me = match api.get("/users/@me").await {
-        Ok(me) => me,
-        Err(e) if is_unauthorized(&e) => {
-            forget_token();
-            return true;
-        }
-        Err(e) => {
-            notice(&ui, i18n::tf("Не удалось войти: {}", &[&e]));
-            return false;
+    let me = loop {
+        match api.get("/users/@me").await {
+            Ok(me) => break me,
+            Err(e) if is_unauthorized(&e) => {
+                forget_token();
+                return true;
+            }
+            // Nothing can work without this answer, and the network may come back: keep asking, and offer to look into it.
+            Err(e) => {
+                log_line(&format!("start: {e}"));
+                let text = discord::friendly(&e);
+                on_ui(&ui, move |ui| ui.set_status(text.into()));
+                netcheck::set_down(&ui, true);
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    cmd = cmds.recv() => {
+                        if cmd.is_none() {
+                            return false;
+                        }
+                    }
+                }
+            }
         }
     };
     discord::AUTH_LOST.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -9693,6 +9718,7 @@ async fn run_once(ui: Weak<AppWindow>, cmds: &mut UnboundedReceiver<Cmd>, saved:
 
 /// `--demo` fills the window with made-up data, for screenshots without an account.
 fn fill_demo(ui: &AppWindow) {
+    netcheck::demo(ui);
     let guilds = [("@me", "Личные сообщения"), ("1", "Тестовый сервер"), ("2", "Nimbus Dev"), ("3", "Rust")]
         .map(|(id, name)| Guild { id: id.into(), name: name.into(), ..Default::default() }.item());
     // Each of the voice badges, once: someone in voice, someone showing a screen, you in voice.
@@ -11135,6 +11161,13 @@ fn main() -> Result<(), slint::PlatformError> {
         log_line(&report);
         return Ok(());
     }
+    if let Some(arg) = std::env::args().find(|a| a == "--net-check" || a.starts_with("--net-check=")) {
+        let proxy = arg.strip_prefix("--net-check=").map(str::to_string);
+        let runtime = tokio::runtime::Runtime::new().expect("failed to start the tokio runtime");
+        let report = runtime.block_on(netcheck::report(proxy));
+        log_line(&report);
+        return Ok(());
+    }
     // One running copy; the self-checks and demo windows (which have flags) may run beside it.
     if std::env::args().len() == 1 && !system::first_instance() {
         return Ok(());
@@ -11874,6 +11907,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = record_cancel_tx.send(Cmd::RecordCancel);
     });
     ui.on_install_update(update::install);
+    netcheck::wire(&ui);
     let web_tx = tx.clone();
     let web_ui = ui.as_weak();
     ui.on_web_login(move || {

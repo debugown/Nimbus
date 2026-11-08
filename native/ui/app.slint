@@ -630,6 +630,30 @@ export struct VoiceStats {
 }
 
 // A line of the changelog. kind: 0 version, 1 section, 2 item, 3 plain text.
+export struct NetStep {
+    name: string,
+    // 0 not known yet, 1 fine, 2 broken.
+    state: int,
+    detail: string,
+}
+
+// Made in Rust, so that a language without these yet falls back to English.
+export struct NetTexts {
+    banner: string,
+    fix: string,
+    title: string,
+    repair: string,
+    copy: string,
+    close: string,
+    proxy-label: string,
+    apply: string,
+    placeholder: string,
+    ask: string,
+    ask-note: string,
+    send: string,
+    dont-send: string,
+}
+
 export struct ChangelogLine {
     kind: int,
     text: string,
@@ -3697,6 +3721,90 @@ component InfoDialog inherits Rectangle {
                 spacing: 10px;
                 DialogButton { text: @tr("" => "Копировать"); clicked => { root.copy(); } }
                 DialogButton { text: @tr("" => "Закрыть"); primary: true; clicked => { root.closed(); } }
+            }
+        }
+    }
+}
+
+// Where the way to Discord breaks, and a look for one that works.
+component NetDialog inherits Rectangle {
+    in property <NetTexts> texts;
+    in property <[NetStep]> steps;
+    in property <string> verdict;
+    in property <bool> busy;
+    in-out property <string> proxy;
+    in property <bool> asking;
+    in property <string> report;
+    in property <string> sent;
+    callback send();
+    callback dont-send();
+    callback repair();
+    callback apply(string);
+    callback copy();
+    callback closed();
+    background: #000000b8;
+    TouchArea { clicked => { root.closed(); } }
+    Rectangle {
+        y: (root.height - self.height) / 2;
+        width: min(500px, root.width - 48px);
+        height: net-body.preferred-height;
+        border-radius: 10px;
+        background: Theme.glass-strong;
+        border-width: 1px;
+        border-color: Theme.edge;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: Theme.shadow;
+        TouchArea {}
+        net-body := VerticalLayout {
+            padding: 20px;
+            spacing: 12px;
+            Text { text: root.texts.title; color: Theme.text; font-size: 18px; font-weight: 800; overflow: elide; }
+            VerticalLayout {
+                for step in root.steps: HorizontalLayout {
+                    height: 26px;
+                    spacing: 10px;
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle { width: 8px; height: 8px; border-radius: 4px; background: step.state == 1 ? Theme.green : step.state == 2 ? #f04a55 : Theme.faint; }
+                    }
+                    Text { width: 190px; text: step.name; color: Theme.text; font-size: 14px; font-weight: 500; vertical-alignment: center; overflow: elide; }
+                    Text { horizontal-stretch: 1; text: step.detail; color: Theme.muted; font-size: 12px; vertical-alignment: center; overflow: elide; }
+                }
+            }
+            Text { text: root.verdict; color: Theme.text2; font-size: 14px; wrap: word-wrap; }
+            if root.asking: VerticalLayout {
+                spacing: 8px;
+                Text { text: root.texts.ask; color: Theme.text; font-size: 14px; font-weight: 600; wrap: word-wrap; }
+                Text { text: root.report; color: Theme.muted; font-size: 12px; font-family: "Cascadia Mono"; wrap: word-wrap; }
+                Text { text: root.texts.ask-note; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+                    DialogButton { text: root.texts.dont-send; clicked => { root.dont-send(); } }
+                    DialogButton { text: root.texts.send; enabled: !root.busy; clicked => { root.send(); } }
+                }
+            }
+            if root.sent != "": Text { text: root.sent; color: Theme.text2; font-size: 14px; wrap: word-wrap; }
+            Text { text: root.texts.proxy-label; color: Theme.muted; font-size: 12px; font-weight: 500; }
+            HorizontalLayout {
+                spacing: 8px;
+                SettingField {
+                    horizontal-stretch: 1;
+                    text <=> root.proxy;
+                    placeholder: root.texts.placeholder;
+                    accepted => { root.apply(root.proxy); }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    DialogButton { text: root.texts.apply; enabled: !root.busy; clicked => { root.apply(root.proxy); } }
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: 10px;
+                DialogButton { text: root.texts.copy; clicked => { root.copy(); } }
+                DialogButton { text: root.texts.close; clicked => { root.closed(); } }
+                DialogButton { text: root.texts.repair; primary: true; enabled: !root.busy; clicked => { root.repair(); } }
             }
         }
     }
@@ -7869,6 +7977,22 @@ export component AppWindow inherits Window {
     public function open-profile-status() { root.profile-status-open = true; }
     in property <string> status: @tr("" => "Подключение…");
     in property <bool> online;
+    // The connection isn't coming back by itself.
+    in property <bool> net-down;
+    in property <NetTexts> net-texts;
+    in property <[NetStep]> net-steps;
+    in property <string> net-verdict;
+    in property <bool> net-busy;
+    in-out property <bool> net-open;
+    in-out property <string> net-proxy;
+    in-out property <bool> net-asking;
+    in property <string> net-report;
+    in property <string> net-sent;
+    callback net-send();
+    callback net-check();
+    callback net-repair();
+    callback net-apply(string);
+    callback net-copy();
     // Shown over the chat when no channel is open, or when something failed.
     in property <string> notice: @tr("" => "Выбери канал или личную переписку слева");
     // The sound of the stream being watched, in percent (the slider on the stream).
@@ -12401,6 +12525,55 @@ export component AppWindow inherits Window {
     if Appearance.updated-open && !root.login-needed: UpdatedWindow {
         width: root.width;
         height: root.height;
+    }
+    if root.net-down && !root.net-open: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: 40px;
+        width: net-line.preferred-width;
+        height: 40px;
+        border-radius: 8px;
+        background: Theme.popup;
+        border-width: 1px;
+        border-color: Theme.edge;
+        drop-shadow-blur: 18px;
+        drop-shadow-color: Theme.shadow;
+        net-line := HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 4px;
+            padding-top: 3px;
+            padding-bottom: 3px;
+            spacing: 12px;
+            Text { text: root.net-texts.banner; color: Theme.text; font-size: 14px; font-weight: 600; vertical-alignment: center; }
+            Chip {
+                text: root.net-texts.fix;
+                on: true;
+                clicked => {
+                    root.net-open = true;
+                    root.net-check();
+                }
+            }
+        }
+    }
+    if root.net-open: NetDialog {
+        width: root.width;
+        height: root.height;
+        texts: root.net-texts;
+        steps: root.net-steps;
+        verdict: root.net-verdict;
+        busy: root.net-busy;
+        proxy <=> root.net-proxy;
+        asking: root.net-asking;
+        report: root.net-report;
+        sent: root.net-sent;
+        send => {
+            root.net-asking = false;
+            root.net-send();
+        }
+        dont-send => { root.net-asking = false; }
+        repair => { root.net-repair(); }
+        apply(text) => { root.net-apply(text); }
+        copy => { root.net-copy(); }
+        closed => { root.net-open = false; }
     }
     TitleBar {
         x: 0px;

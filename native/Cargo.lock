@@ -5303,7 +5303,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nimbus-native"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -5330,6 +5330,7 @@ dependencies = [
  "symphonia",
  "symphonia-core",
  "tokio",
+ "tokio-socks",
  "tokio-tungstenite 0.24.0",
  "tray-icon",
  "unicode-normalization",
@@ -8973,6 +8974,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls 0.23.46",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-socks"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7e2948f60dbe26b35f2c7fb74ac2854c1fddded0fe9d7548fcc674a246f7615"
+dependencies = [
+ "either",
+ "futures-util",
+ "thiserror 1.0.69",
  "tokio",
 ]
 

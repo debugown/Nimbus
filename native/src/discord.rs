@@ -9,6 +9,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const API: &str = "https://discord.com/api/v10";
 const GATEWAY: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
+const GATEWAY_TARGET: &str = "gateway.discord.gg:443";
 // Honest UA: we are an unofficial client and do not pretend otherwise.
 const USER_AGENT: &str = concat!("Nimbus-Native/", env!("CARGO_PKG_VERSION"), " (unofficial Discord client)");
 
@@ -44,6 +45,8 @@ pub enum Event {
     /// by event name.
     Chat(String, Value),
     Status(String),
+    /// The connection isn't coming back by itself: the app offers to look into it.
+    Offline,
 }
 
 #[derive(Clone)]
@@ -76,7 +79,7 @@ pub fn is_internal_url(url: &reqwest::Url) -> bool {
 
 impl Api {
     pub fn new(token: String) -> Self {
-        let http = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .connect_timeout(Duration::from_secs(15))
             // A redirect may lead anywhere; never to this computer or a home network, and not forever.
@@ -88,9 +91,11 @@ impl Api {
                 } else {
                     attempt.follow()
                 }
-            }))
-            .build()
-            .expect("failed to build HTTP client");
+            }));
+        if let Some(proxy) = own_proxy().and_then(|p| reqwest::Proxy::all(p).ok()) {
+            builder = builder.proxy(proxy);
+        }
+        let http = builder.build().expect("failed to build HTTP client");
         Self { http, token }
     }
 
@@ -484,11 +489,18 @@ const CONTEXT_USER_MENU: &str = "eyJsb2NhdGlvbiI6IkNvbnRleHRNZW51In0=";
 /// sends what `outgoing` brings (voice state updates).
 pub async fn run_gateway(token: String, events: UnboundedSender<Event>, mut outgoing: UnboundedReceiver<Value>) {
     let mut resume: Option<Resume> = None;
+    let mut failures = 0;
     loop {
+        let started = std::time::Instant::now();
         if let Err(e) = session(&token, &events, &mut outgoing, &mut resume).await {
             crate::log_line(&format!("gateway: {e}"));
             crate::log_line(&format!("gateway: no connection: {e}"));
             let _ = events.send(Event::Status(crate::i18n::tf("Нет связи: {}", &[&e])));
+            // A session that ran for a while and dropped is ordinary, and usually comes back at once.
+            failures = if started.elapsed() > Duration::from_secs(30) { 1 } else { failures + 1 };
+            if failures >= 2 || resume.is_none() {
+                let _ = events.send(Event::Offline);
+            }
         }
         // A token Discord refuses won't work on the next try either: the app goes back to the sign-in screen.
         if events.is_closed() || AUTH_LOST.load(std::sync::atomic::Ordering::Relaxed) {
@@ -660,8 +672,8 @@ type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStre
 /// The first connection to Discord that worked only through a proxy was the pages and pictures; the gateway
 /// is a different kind of connection, which has to be told about the proxy by hand.
 async fn connect_gateway(address: Option<&str>) -> Result<Socket> {
-    if let Some(proxy) = system_proxy() {
-        match tokio::time::timeout(Duration::from_secs(15), connect_via_proxy(&proxy)).await {
+    if let Some(proxy) = own_proxy().or_else(|| system_proxy().map(|p| format!("http://{p}"))) {
+        match tokio::time::timeout(Duration::from_secs(15), connect_through(&proxy)).await {
             Ok(Ok(ws)) => {
                 crate::log_line(&format!("gateway: connected through the proxy {proxy}"));
                 return Ok(ws);
@@ -677,10 +689,20 @@ async fn connect_gateway(address: Option<&str>) -> Result<Socket> {
     Ok(ws)
 }
 
+/// `proxy` as `parse_proxy` writes it.
+async fn connect_through(proxy: &str) -> Result<Socket> {
+    let Some(address) = proxy.strip_prefix("socks5h://") else {
+        return connect_via_proxy(proxy.strip_prefix("http://").unwrap_or(proxy)).await;
+    };
+    let tcp = tokio_socks::tcp::Socks5Stream::connect(address, GATEWAY_TARGET).await.map_err(err)?.into_inner();
+    let (ws, _) = tokio_tungstenite::client_async_tls(GATEWAY, tcp).await.map_err(err)?;
+    Ok(ws)
+}
+
 async fn connect_via_proxy(proxy: &str) -> Result<Socket> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut tcp = tokio::net::TcpStream::connect(proxy).await.map_err(err)?;
-    let target = "gateway.discord.gg:443";
+    let target = GATEWAY_TARGET;
     tcp.write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes()).await.map_err(err)?;
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
@@ -741,6 +763,101 @@ fn proxy_from_settings(server: &str) -> Option<String> {
     pick("https").or_else(|| pick("http"))
 }
 
+/// A proxy written the way the rest of the code takes it: "http://host:port" or "socks5h://host:port"
+/// (the proxy looks up the name: the local answer may be the blocked one).
+pub fn parse_proxy(text: &str) -> Result<String> {
+    let text = text.trim();
+    let (socks, rest) = match text.split_once("://") {
+        Some(("socks" | "socks5" | "socks5h", rest)) => (true, rest),
+        Some(("http" | "https", rest)) => (false, rest),
+        Some(_) => return Err(crate::i18n::t("Нужен адрес вида 127.0.0.1:1080 или socks5://127.0.0.1:1080, без логина и пароля")),
+        None => (false, text),
+    };
+    let rest = rest.trim_end_matches('/');
+    let fits = rest.rsplit_once(':').is_some_and(|(host, port)| !host.is_empty() && !host.contains(['@', '/', ' ']) && port.parse::<u16>().is_ok_and(|p| p > 0));
+    if !fits {
+        return Err(crate::i18n::t("Нужен адрес вида 127.0.0.1:1080 или socks5://127.0.0.1:1080, без логина и пароля"));
+    }
+    Ok(format!("{}://{rest}", if socks { "socks5h" } else { "http" }))
+}
+
+/// The proxy kept by the connection window, if any.
+pub fn own_proxy() -> Option<String> {
+    crate::prefs::read()["proxy"].as_str().and_then(|p| parse_proxy(p).ok())
+}
+
+pub fn save_proxy(proxy: Option<&str>) {
+    crate::prefs::write("proxy", json!(proxy));
+}
+
+/// Every proxy address in a proxy script. The script isn't run: each address is simply tried.
+fn proxies_in_pac(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (word, scheme) in [("PROXY ", "http://"), ("SOCKS5 ", "socks5://"), ("SOCKS ", "socks5://")] {
+        for part in text.split(word).skip(1) {
+            let address: String = part.chars().take_while(|c| c.is_alphanumeric() || ".-:_".contains(*c)).collect();
+            found.extend(parse_proxy(&format!("{scheme}{address}")).ok());
+        }
+    }
+    found
+}
+
+/// The SOCKS proxy this PC is set to use, from the usual variables or Windows' internet settings (read only).
+fn system_socks() -> Option<String> {
+    for name in ["ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy"] {
+        if let Some(found) = std::env::var(name).ok().filter(|v| v.trim().starts_with("socks")).and_then(|v| parse_proxy(&v).ok()) {
+            return Some(found);
+        }
+    }
+    let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+    let enabled = registry_value(key, "ProxyEnable")?;
+    if !(enabled.ends_with("0x1") || enabled == "1") {
+        return None;
+    }
+    let server = registry_value(key, "ProxyServer")?;
+    server.split(';').find_map(|part| part.trim().strip_prefix("socks=")).and_then(|address| parse_proxy(&format!("socks5://{address}")).ok())
+}
+
+/// The usual ports of VPN and proxy programs on this PC (v2rayN, NekoRay, Clash, Tor and the like).
+const LOCAL_PROXIES: [(&str, u16); 9] = [("socks5", 10808), ("http", 10809), ("socks5", 1080), ("socks5", 2080), ("http", 2081), ("http", 7890), ("socks5", 7891), ("socks5", 9150), ("socks5", 9050)];
+
+/// Proxies worth trying, the most likely first. Only addresses are gathered here.
+pub async fn proxy_candidates() -> Vec<String> {
+    let mut found: Vec<String> = own_proxy().into_iter().collect();
+    found.extend(system_proxy().map(|p| format!("http://{p}")));
+    found.extend(system_socks());
+    let script = registry_value(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "AutoConfigURL").filter(|url| url.starts_with("http"));
+    if let Some(url) = script {
+        if let Ok(client) = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build() {
+            if let Ok(answer) = client.get(url).send().await {
+                found.extend(proxies_in_pac(&answer.text().await.unwrap_or_default()));
+            }
+        }
+    }
+    for (scheme, port) in LOCAL_PROXIES {
+        let open = tokio::time::timeout(Duration::from_millis(300), tokio::net::TcpStream::connect(("127.0.0.1", port))).await;
+        if matches!(open, Ok(Ok(_))) {
+            found.extend(parse_proxy(&format!("{scheme}://127.0.0.1:{port}")).ok());
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    found.retain(|p| seen.insert(p.clone()));
+    found
+}
+
+/// Opening the gateway the way a session would, and leaving: nothing is sent on it, so no token either.
+pub async fn test_gateway() -> Result<()> {
+    connect_gateway(None).await.map(|_| ())
+}
+
+pub async fn test_direct() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(10), connect_async(GATEWAY)).await.map_err(|_| "no answer in 10 s".to_string())?.map_err(err).map(|_| ())
+}
+
+pub async fn test_proxy(proxy: &str) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(10), connect_through(proxy)).await.map_err(|_| "no answer in 10 s".to_string())?.map(|_| ())
+}
+
 /// Set when Discord answers 401 or closes the gateway with 4004: the saved token may have been
 /// revoked (signed out everywhere). The app checks it once more, then asks for a new sign-in.
 pub static AUTH_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -798,6 +915,24 @@ mod tests {
         for s in ["https://cdn.discordapp.com/a.png", "https://8.8.8.8/", "https://media.tenor.com/x.gif"] {
             assert!(!internal(s), "{s}");
         }
+    }
+
+    #[test]
+    fn proxies_typed_in_are_checked() {
+        assert_eq!(parse_proxy(" 127.0.0.1:1080 "), Ok("http://127.0.0.1:1080".into()));
+        assert_eq!(parse_proxy("https://a.example:8080/"), Ok("http://a.example:8080".into()));
+        assert_eq!(parse_proxy("socks5://127.0.0.1:1080"), Ok("socks5h://127.0.0.1:1080".into()));
+        assert_eq!(parse_proxy("socks://h:1"), Ok("socks5h://h:1".into()));
+        for bad in ["", "host", "host:0", "host:99999", ":80", "user:pw@host:80", "ftp://h:21", "http://a b:80"] {
+            assert!(parse_proxy(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_proxy_script_gives_its_addresses() {
+        let script = r#"function FindProxyForURL(u, h) { if (h == "x") return "PROXY 10.0.0.1:3128; DIRECT"; return "SOCKS5 127.0.0.1:1080"; }"#;
+        assert_eq!(proxies_in_pac(script), vec!["http://10.0.0.1:3128".to_string(), "socks5h://127.0.0.1:1080".to_string()]);
+        assert!(proxies_in_pac("return \"DIRECT\";").is_empty());
     }
 
     #[test]
